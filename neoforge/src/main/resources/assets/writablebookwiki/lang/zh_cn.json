@@ -1,0 +1,7 @@
+{
+  "key.categories.writablebookwiki": "Writable Book Wiki",
+  "key.writablebookwiki.open_reader": "打开 Wiki 阅读器",
+  "key.writablebookwiki.toggle_window_host": "切换独立窗口 / 游戏内窗口",
+  "item.writablebookwiki.editable_book": "Writable Book Wiki",
+  "item.writablebookwiki.editable_book.create_failed": "无法创建编辑书文档，请稍后重试。"
+}

@@ -1,0 +1,7 @@
+{
+  "key.categories.writablebookwiki": "Writable Book Wiki",
+  "key.writablebookwiki.open_reader": "Open Wiki Reader",
+  "key.writablebookwiki.toggle_window_host": "Switch Standalone / In-game Window",
+  "item.writablebookwiki.editable_book": "Writable Book Wiki",
+  "item.writablebookwiki.editable_book.create_failed": "Unable to create the book document. Please try again."
+}

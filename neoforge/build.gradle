@@ -1,0 +1,100 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.146'
+}
+
+evaluationDependsOn(':core')
+evaluationDependsOn(':plugin-api')
+evaluationDependsOn(':local')
+
+base {
+    archivesName = mod_name
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
+    withSourcesJar()
+}
+
+neoForge {
+    version = neo_version
+
+    parchment {
+        mappingsVersion = parchment_mappings_version
+        minecraftVersion = parchment_minecraft_version
+    }
+
+    runs {
+        client {
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', mod_id
+        }
+        server {
+            server()
+            programArgument '--nogui'
+            systemProperty 'neoforge.enabledGameTestNamespaces', mod_id
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+            // The three internal modules are merged into this mod's release JAR.
+            // Register their outputs here too, so the NeoForge development
+            // launcher loads them in the same mod class loader.
+            sourceSet(project(':core').sourceSets.main)
+            sourceSet(project(':plugin-api').sourceSets.main)
+            sourceSet(project(':local').sourceSets.main)
+        }
+    }
+}
+
+dependencies {
+    implementation project(':core')
+    implementation project(':plugin-api')
+    implementation project(':local')
+}
+
+// Opt-in in-engine UI regression harness. It is never included in the release JAR.
+sourceSets {
+    editorSmoke {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += output + compileClasspath + sourceSets.main.runtimeClasspath
+    }
+}
+if (providers.gradleProperty('editorSmoke').isPresent()) {
+    neoForge.mods."${mod_id}".sourceSet(sourceSets.editorSmoke)
+    neoForge.runs.client {
+        gameDirectory = layout.projectDirectory.dir('run-editor-smoke')
+        systemProperty 'writablebookwiki.editorSmoke', 'true'
+        programArguments.addAll('--width', '1600', '--height', '1000')
+    }
+    tasks.named('runClient').configure { dependsOn tasks.named('editorSmokeClasses') }
+}
+
+tasks.named('jar', Jar).configure {
+    archiveFileName = "${mod_name}-${mod_version}-NeoForge-${minecraft_version}.jar"
+    from project(':core').sourceSets.main.output
+    from project(':plugin-api').sourceSets.main.output
+    from project(':local').sourceSets.main.output
+}
+
+var generateModMetadata = tasks.register('generateModMetadata', ProcessResources) {
+    var replaceProperties = [
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            neo_version            : neo_version,
+            loader_version_range   : loader_version_range,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+    ]
+    inputs.properties replaceProperties
+    expand replaceProperties
+    from 'src/main/templates'
+    into layout.buildDirectory.dir('generated/sources/modMetadata')
+}
+
+sourceSets.main.resources.srcDir generateModMetadata
+neoForge.ideSyncTask generateModMetadata

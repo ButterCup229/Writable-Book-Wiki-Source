@@ -1,7 +1,0 @@
-{
-  "key.categories.editbookwiki": "编辑书 Wiki",
-  "key.editbookwiki.open_reader": "打开 Wiki 阅读器",
-  "key.editbookwiki.toggle_window_host": "切换独立窗口 / 游戏内窗口",
-  "item.editbookwiki.editable_book": "编辑书 Wiki",
-  "item.editbookwiki.editable_book.create_failed": "无法创建编辑书文档，请稍后重试。"
-}

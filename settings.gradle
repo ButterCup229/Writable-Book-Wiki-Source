@@ -18,9 +18,9 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = 'editbook-wiki'
+rootProject.name = 'Writable Book Wiki'
 
-include 'wiki-core'
-include 'wiki-plugin-api'
-include 'wiki-local'
-include 'wiki-neoforge'
+include 'core'
+include 'plugin-api'
+include 'local'
+include 'neoforge'
