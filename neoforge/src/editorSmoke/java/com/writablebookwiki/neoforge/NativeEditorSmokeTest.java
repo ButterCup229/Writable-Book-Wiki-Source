@@ -51,7 +51,7 @@ public final class NativeEditorSmokeTest {
                 completedAt = ticks;
                 stage = 1;
             } else if (stage == 1 && ticks - completedAt > 20) {
-                exerciseRenameCompatibility();
+                exerciseModIdentityAndStorage();
                 exerciseInputs();
                 exerciseTableDeletion();
                 exerciseClipboardImage();
@@ -178,16 +178,16 @@ public final class NativeEditorSmokeTest {
         }
     }
 
-    private static void exerciseRenameCompatibility() throws Exception {
+    private static void exerciseModIdentityAndStorage() throws Exception {
         var item = WritableBookWikiItems.EDITABLE_BOOK.get();
-        var oldId = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("editbookwiki", "editable_book");
         var newId = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("writablebookwiki", "editable_book");
-        check(net.minecraft.core.registries.BuiltInRegistries.ITEM.get(oldId) == item,
-                "legacy item registry ID resolves to the renamed book");
+        var previousId = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("editbookwiki", "editable_book");
+        check(net.minecraft.core.registries.BuiltInRegistries.ITEM.get(previousId) != item,
+                "new mod does not register an old-development item alias");
         check(net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(item).equals(newId),
-                "new books serialize under writablebookwiki namespace");
+                "books serialize under writablebookwiki namespace");
         check(item.getDescriptionId().equals("item.writablebookwiki.editable_book"),
-                "item translation key uses the new namespace");
+                "item translation key uses the current namespace");
         check(net.minecraft.client.resources.language.I18n.get(item.getDescriptionId()).equals("Writable Book Wiki"),
                 "in-game item name is Writable Book Wiki");
 
@@ -196,76 +196,53 @@ public final class NativeEditorSmokeTest {
         var stack = new net.minecraft.world.item.ItemStack(item);
         var root = new net.minecraft.nbt.CompoundTag();
         root.putString("unrelated", "preserve me");
-        var oldBook = new net.minecraft.nbt.CompoundTag();
-        oldBook.putUUID("book_id", pointer.bookId());
-        oldBook.putString("content_hash", pointer.contentHash());
-        oldBook.putBoolean("locked", pointer.locked());
-        root.put("editbookwiki_book", oldBook);
+        var previousBook = new net.minecraft.nbt.CompoundTag();
+        previousBook.putUUID("book_id", pointer.bookId());
+        previousBook.putString("content_hash", pointer.contentHash());
+        previousBook.putBoolean("locked", pointer.locked());
+        root.put("editbookwiki_book", previousBook);
         stack.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA,
                 net.minecraft.world.item.component.CustomData.of(root));
-        check(BookStackData.read(stack).orElseThrow().equals(pointer),
-                "legacy custom data retains book ID, content hash and locked state");
-        var serialized = (net.minecraft.nbt.CompoundTag) stack.save(lookup);
-        serialized.putString("id", oldId.toString());
-        var restored = net.minecraft.world.item.ItemStack.parse(lookup, serialized).orElseThrow();
+        check(BookStackData.read(stack).isEmpty(), "new mod does not interpret old-development custom data");
+        BookStackData.write(stack, pointer);
+        var restored = net.minecraft.world.item.ItemStack.parse(lookup, stack.save(lookup)).orElseThrow();
         check(restored.is(item) && BookStackData.read(restored).orElseThrow().equals(pointer),
-                "full old ItemStack NBT decodes through alias without losing document pointer");
-        BookStackData.write(restored, pointer);
-        var rewritten = restored.get(net.minecraft.core.component.DataComponents.CUSTOM_DATA).copyTag();
-        check(rewritten.contains("writablebookwiki_book") && !rewritten.contains("editbookwiki_book"),
-                "next confirmed pointer write upgrades only the legacy custom-data root");
-        check("preserve me".equals(rewritten.getString("unrelated")) && BookStackData.read(restored).orElseThrow().equals(pointer),
-                "rewritten pointer preserves unrelated item data and lock state");
+                "current ItemStack NBT round trip preserves book ID, hash and lock");
+        check("preserve me".equals(restored.get(net.minecraft.core.component.DataComponents.CUSTOM_DATA).copyTag().getString("unrelated")),
+                "pointer write preserves unrelated custom data");
 
+        Path world = Files.createTempDirectory(OUTPUT, "namespace-world-");
+        Path data = Files.createDirectories(world.resolve("data"));
+        var storage = new net.minecraft.world.level.storage.DimensionDataStorage(data.toFile(),
+                net.minecraft.util.datafix.DataFixers.getDataFixer(), lookup);
         var previousIndex = new WorldBookIndexData();
-        previousIndex.registerMigration(pointer.bookId(), pointer.contentHash(), "b".repeat(64));
-        var migrated = WorldBookIndexData.fromLegacy(previousIndex);
-        check(migrated.hasLegacyAlias(pointer.bookId(), pointer.contentHash(), "b".repeat(64)),
-                "renamed world index preserves historical document hash aliases");
-        check(WorldBookIndexData.load(migrated.save(new net.minecraft.nbt.CompoundTag(), lookup), lookup)
-                        .contentHash(pointer.bookId()).orElseThrow().equals(pointer.contentHash()),
-                "renamed world index serializes without changing document IDs or hashes");
-
-        Path oldWorld = Files.createTempDirectory(OUTPUT, "namespace-world-");
-        Path oldData = Files.createDirectories(oldWorld.resolve("data"));
-        var oldStorage = new net.minecraft.world.level.storage.DimensionDataStorage(oldData.toFile(),
-                net.minecraft.util.datafix.DataFixers.getDataFixer(), lookup);
-        oldStorage.set("editbookwiki_book_index", previousIndex);
-        oldStorage.save();
+        previousIndex.register(pointer.bookId(), pointer.contentHash());
+        storage.set("editbookwiki_book_index", previousIndex);
+        storage.save();
         net.neoforged.neoforge.common.IOUtilities.waitUntilIOWorkerComplete();
-        byte[] oldIndexBytes = Files.readAllBytes(oldData.resolve("editbookwiki_book_index.dat"));
-        var reopenedStorage = new net.minecraft.world.level.storage.DimensionDataStorage(oldData.toFile(),
-                net.minecraft.util.datafix.DataFixers.getDataFixer(), lookup);
-        var recoveredIndex = WorldBookIndexData.get(reopenedStorage);
-        check(recoveredIndex.hasLegacyAlias(pointer.bookId(), pointer.contentHash(), "b".repeat(64)),
-                "old world index .dat is recovered through actual DimensionDataStorage");
-        reopenedStorage.save();
+        byte[] previousIndexBytes = Files.readAllBytes(data.resolve("editbookwiki_book_index.dat"));
+        var currentIndex = WorldBookIndexData.get(storage);
+        check(currentIndex.contentHash(pointer.bookId()).isEmpty(), "new mod does not adopt an old-development world index");
+        currentIndex.register(pointer.bookId(), pointer.contentHash());
+        storage.save();
         net.neoforged.neoforge.common.IOUtilities.waitUntilIOWorkerComplete();
-        check(Files.isRegularFile(oldData.resolve("writablebookwiki_book_index.dat"))
-                        && Arrays.equals(oldIndexBytes, Files.readAllBytes(oldData.resolve("editbookwiki_book_index.dat"))),
-                "new index file is written while original old index bytes remain unchanged");
-        var rereadStorage = new net.minecraft.world.level.storage.DimensionDataStorage(oldData.toFile(),
+        check(Files.isRegularFile(data.resolve("writablebookwiki_book_index.dat"))
+                        && Arrays.equals(previousIndexBytes, Files.readAllBytes(data.resolve("editbookwiki_book_index.dat"))),
+                "current world index is saved without altering unrelated files");
+        var reopened = new net.minecraft.world.level.storage.DimensionDataStorage(data.toFile(),
                 net.minecraft.util.datafix.DataFixers.getDataFixer(), lookup);
-        check(WorldBookIndexData.get(rereadStorage).hasLegacyAlias(pointer.bookId(), pointer.contentHash(), "b".repeat(64)),
-                "index compatibility survives save and reopen");
-        var legacyDocument = document(List.of(paragraph("legacy saved book")));
+        check(WorldBookIndexData.get(reopened).contentHash(pointer.bookId()).orElseThrow().equals(pointer.contentHash()),
+                "current world index survives save and reopen");
+        var savedDocument = document(List.of(paragraph("saved book")));
         var documentPointer = new com.writablebookwiki.core.book.BookPointer(UUID.randomUUID(),
-                new WikiDocumentCodec().contentHash(legacyDocument), true);
-        Path oldDocumentPath = oldWorld.resolve("editbookwiki/documents").resolve(documentPointer.bookId() + ".ewd");
-        new LocalDocumentStore(oldDocumentPath).save(legacyDocument);
-        byte[] oldDocumentBytes = Files.readAllBytes(oldDocumentPath);
-        Path oldAsset = oldWorld.resolve("editbookwiki/assets").resolve("c".repeat(64) + ".asset");
-        Files.createDirectories(oldAsset.getParent());
-        Files.write(oldAsset, new byte[]{1, 2, 3});
-        var repository = WorldBookRepository.forRoot(oldWorld, recoveredIndex);
+                new WikiDocumentCodec().contentHash(savedDocument), true);
+        var repository = WorldBookRepository.forRoot(world, currentIndex);
+        repository.saveNew(new com.writablebookwiki.core.book.BookRevision(documentPointer, savedDocument));
         var loaded = repository.load(documentPointer).orElseThrow();
-        check(loaded.pointer().equals(documentPointer) && loaded.document().equals(legacyDocument),
-                "legacy world document loads unchanged with original book ID, hash and lock");
-        check(repository.assetPathIfPresent("c".repeat(64)).orElseThrow().equals(oldAsset),
-                "legacy world image assets remain discoverable in original directory");
-        check(Arrays.equals(oldDocumentBytes, Files.readAllBytes(oldDocumentPath))
-                        && !Files.exists(oldWorld.resolve("writablebookwiki")),
-                "opening an old book does not relocate or overwrite world content");
+        check(loaded.pointer().equals(documentPointer) && loaded.document().equals(savedDocument),
+                "current world document round trip preserves content and pointer");
+        check(Files.isRegularFile(world.resolve("writablebookwiki/documents").resolve(documentPointer.bookId() + ".ewd")),
+                "world documents are stored in the documented directory");
     }
 
     private static void exerciseInputs() throws Exception {

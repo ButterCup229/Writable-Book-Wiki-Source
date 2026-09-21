@@ -11,7 +11,6 @@ import net.minecraft.world.item.component.CustomData;
 /** Compact, synchronised pointer data carried by an editable-book ItemStack. */
 final class BookStackData {
     private static final String ROOT_KEY = "writablebookwiki_book";
-    private static final String LEGACY_ROOT_KEY = com.writablebookwiki.core.ModIdentity.LEGACY_MOD_ID + "_book";
     private static final String BOOK_ID_KEY = "book_id";
     private static final String CONTENT_HASH_KEY = "content_hash";
     private static final String LOCKED_KEY = "locked";
@@ -25,11 +24,10 @@ final class BookStackData {
             return Optional.empty();
         }
         CompoundTag all = data.copyTag();
-        String root = all.contains(ROOT_KEY, Tag.TAG_COMPOUND) ? ROOT_KEY : LEGACY_ROOT_KEY;
-        if (!all.contains(root, Tag.TAG_COMPOUND)) {
+        if (!all.contains(ROOT_KEY, Tag.TAG_COMPOUND)) {
             return Optional.empty();
         }
-        CompoundTag value = all.getCompound(root);
+        CompoundTag value = all.getCompound(ROOT_KEY);
         if (!value.hasUUID(BOOK_ID_KEY) || !value.contains(CONTENT_HASH_KEY, Tag.TAG_STRING)) {
             return Optional.empty();
         }
@@ -51,7 +49,6 @@ final class BookStackData {
             value.putString(CONTENT_HASH_KEY, pointer.contentHash());
             value.putBoolean(LOCKED_KEY, pointer.locked());
             all.put(ROOT_KEY, value);
-            all.remove(LEGACY_ROOT_KEY);
         });
     }
 }

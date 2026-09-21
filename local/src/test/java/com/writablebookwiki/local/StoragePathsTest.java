@@ -10,49 +10,41 @@ import org.junit.jupiter.api.io.TempDir;
 class StoragePathsTest {
     @TempDir Path root;
 
-    @Test void freshInstallUsesNewNamespaceWithoutCreatingFiles() {
+    @Test void freshInstallUsesOwnNamespaceWithoutCreatingFiles() {
         assertEquals(root.resolve("writablebookwiki"), StoragePaths.dataRoot(root));
         assertFalse(Files.exists(root.resolve("writablebookwiki")));
-        assertEquals("writablebookwiki-server.toml", StoragePaths.serverConfigName(root));
+        assertEquals("writablebookwiki-server.toml", StoragePaths.serverConfigName());
         assertEquals("Writable Book Wiki", ModIdentity.DISPLAY_NAME);
     }
 
-    @Test void legacyLocalAndWorldDirectoriesRemainReadableAndUntouched() throws Exception {
+    @Test void neverAdoptsOrMovesOldDevelopmentData() throws Exception {
         for (String context : new String[]{"config", "world"}) {
             Path parent = root.resolve(context);
-            Path legacy = Files.createDirectories(parent.resolve("editbookwiki"));
-            Path content = legacy.resolve("retained-data");
-            Files.writeString(content, "old image, annotation, document or preference");
-            assertEquals(legacy, StoragePaths.dataRoot(parent));
-            assertEquals("old image, annotation, document or preference", Files.readString(content));
+            Path previous = Files.createDirectories(parent.resolve("editbookwiki"));
+            Path content = previous.resolve("retained-data");
+            Files.writeString(content, "leave untouched");
+            assertEquals(parent.resolve("writablebookwiki"), StoragePaths.dataRoot(parent));
+            assertEquals("leave untouched", Files.readString(content));
             assertFalse(Files.exists(parent.resolve("writablebookwiki")));
-            assertEquals(legacy, StoragePaths.dataRoot(parent));
         }
     }
 
-    @Test void existingNewDirectoryWinsWithoutMergingOrOverwritingEitherVersion() throws Exception {
-        Path legacy = Files.createDirectories(root.resolve("editbookwiki"));
+    @Test void existingDataDirectoryIsUsedUnchanged() throws Exception {
         Path current = Files.createDirectories(root.resolve("writablebookwiki"));
-        Files.writeString(legacy.resolve("same-name"), "legacy");
-        Files.writeString(current.resolve("same-name"), "current");
+        Files.writeString(current.resolve("retained-data"), "current");
         assertEquals(current, StoragePaths.dataRoot(root));
-        assertEquals("legacy", Files.readString(legacy.resolve("same-name")));
-        assertEquals("current", Files.readString(current.resolve("same-name")));
+        assertEquals("current", Files.readString(current.resolve("retained-data")));
     }
 
     @Test void neverTreatsAFileAsAnEmptyStorageDirectory() throws Exception {
-        Files.writeString(root.resolve("editbookwiki"), "not a directory");
-        assertThrows(IllegalStateException.class, () -> StoragePaths.dataRoot(root));
-        Files.writeString(root.resolve("writablebookwiki"), "also not a directory");
+        Files.writeString(root.resolve("writablebookwiki"), "not a directory");
         assertThrows(IllegalStateException.class, () -> StoragePaths.dataRoot(root));
     }
 
-    @Test void existingServerLimitsSurviveRenameAndCurrentConfigHasPriority() throws Exception {
-        Path legacy = root.resolve("editbookwiki-server.toml");
-        Files.writeString(legacy, "download_bytes_per_second=12345");
-        assertEquals("editbookwiki-server.toml", StoragePaths.serverConfigName(root));
-        Files.writeString(root.resolve("writablebookwiki-server.toml"), "download_bytes_per_second=67890");
-        assertEquals("writablebookwiki-server.toml", StoragePaths.serverConfigName(root));
-        assertEquals("download_bytes_per_second=12345", Files.readString(legacy));
+    @Test void unrelatedServerConfigIsNeverSelectedOrChanged() throws Exception {
+        Path previous = root.resolve("editbookwiki-server.toml");
+        Files.writeString(previous, "download_bytes_per_second=12345");
+        assertEquals("writablebookwiki-server.toml", StoragePaths.serverConfigName());
+        assertEquals("download_bytes_per_second=12345", Files.readString(previous));
     }
 }

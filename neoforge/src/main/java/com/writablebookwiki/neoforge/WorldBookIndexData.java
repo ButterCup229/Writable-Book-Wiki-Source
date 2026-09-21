@@ -37,25 +37,7 @@ final class WorldBookIndexData extends SavedData {
     }
 
     static WorldBookIndexData get(net.minecraft.world.level.storage.DimensionDataStorage storage) {
-        WorldBookIndexData current = storage.get(FACTORY, DATA_NAME);
-        if (current != null) {
-            return current;
-        }
-        WorldBookIndexData legacy = storage.get(FACTORY,
-                com.writablebookwiki.core.ModIdentity.LEGACY_MOD_ID + "_book_index");
-        current = fromLegacy(legacy);
-        storage.set(DATA_NAME, current);
-        return current;
-    }
-
-    /** Copy the in-memory index, including historical hash aliases; never rewrite the old index file. */
-    static WorldBookIndexData fromLegacy(WorldBookIndexData legacy) {
-        WorldBookIndexData result = new WorldBookIndexData();
-        if (legacy != null) {
-            result.records.putAll(legacy.records);
-        }
-        result.setDirty();
-        return result;
+        return storage.computeIfAbsent(FACTORY, DATA_NAME);
     }
 
     static WorldBookIndexData load(CompoundTag tag, HolderLookup.Provider registries) {

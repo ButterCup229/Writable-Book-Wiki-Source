@@ -21,8 +21,7 @@ import java.util.UUID;
  * shared book is saved.</p>
  */
 public final class LocalAnnotationStore {
-    // Stable on-disk format signature, not a display name: retain it to read existing private comments.
-    private static final String COMMENTS_HEADER = "EDITBOOKWIKI-COMMENTS-1";
+    private static final String COMMENTS_HEADER = "WRITABLEBOOKWIKI-COMMENTS-1";
     private final Path directory;
 
     public LocalAnnotationStore(Path directory) {

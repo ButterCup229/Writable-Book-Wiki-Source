@@ -18,9 +18,6 @@ final class WritableBookWikiItems {
     }
 
     static void register(IEventBus modEventBus) {
-        ITEMS.addAlias(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(
-                        com.writablebookwiki.core.ModIdentity.LEGACY_MOD_ID, "editable_book"),
-                EDITABLE_BOOK.getId());
         ITEMS.register(modEventBus);
         modEventBus.addListener(WritableBookWikiItems::addToCreativeTab);
     }

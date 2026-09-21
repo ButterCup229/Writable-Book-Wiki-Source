@@ -9,27 +9,17 @@ public final class StoragePaths {
     private StoragePaths() {
     }
 
-    /** New installs use the new name; an existing legacy-only installation keeps its data in place. */
+    /** Data belongs exclusively to this mod's namespace; unrelated directories are never adopted. */
     public static Path dataRoot(Path parent) {
         Path current = parent.resolve(ModIdentity.MOD_ID);
         if (Files.exists(current)) {
             requireDirectory(current);
-            return current;
-        }
-        Path legacy = parent.resolve(ModIdentity.LEGACY_MOD_ID);
-        if (Files.exists(legacy)) {
-            requireDirectory(legacy);
-            return legacy;
         }
         return current;
     }
 
-    /** Preserve an existing transfer configuration, including its user's custom limits. */
-    public static String serverConfigName(Path configDirectory) {
-        String current = ModIdentity.MOD_ID + "-server.toml";
-        String legacy = ModIdentity.LEGACY_MOD_ID + "-server.toml";
-        return !Files.exists(configDirectory.resolve(current))
-                && Files.isRegularFile(configDirectory.resolve(legacy)) ? legacy : current;
+    public static String serverConfigName() {
+        return ModIdentity.MOD_ID + "-server.toml";
     }
 
     private static void requireDirectory(Path path) {

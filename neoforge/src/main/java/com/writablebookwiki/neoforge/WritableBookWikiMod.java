@@ -12,7 +12,7 @@ public final class WritableBookWikiMod {
 
     public WritableBookWikiMod(IEventBus modEventBus, ModContainer modContainer) {
         modContainer.registerConfig(ModConfig.Type.SERVER, WritableBookWikiServerConfig.SPEC,
-                com.writablebookwiki.local.StoragePaths.serverConfigName(net.neoforged.fml.loading.FMLPaths.CONFIGDIR.get()));
+                com.writablebookwiki.local.StoragePaths.serverConfigName());
         WritableBookWikiItems.register(modEventBus);
     }
 }
