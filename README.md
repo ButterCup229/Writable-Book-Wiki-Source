@@ -2,6 +2,16 @@
 
 面向 **Minecraft 1.21.1 / NeoForge** 的可编写 Wiki 书 Mod：以 Word 式所见即所得编辑正文，用目录组织内容，并将个人批注保存在玩家本机。
 
+## 下载安装
+
+**[点击下载 Writable Book Wiki 0.1.1（NeoForge / Minecraft 1.21.1）](https://github.com/ButterCup229/Writable-Book-Wiki-Source/raw/refs/heads/main/downloads/Writable%20Book%20Wiki-0.1.1-NeoForge-1.21.1.jar)**
+
+安装 Java 21 与 NeoForge 21.1.250 或更新的 1.21.1 版本后，将下载的 JAR 放进当前游戏实例的 `mods` 文件夹即可。无需自行编译，也不需要 LDLib2。多人使用时，客户端和服务器都安装对应版本。
+
+文件大小：431,161 字节（约 421 KiB）。SHA-256：`f0e1cbc823bceb9c061c4baae25f85c4387fb6fa0816976b0869c5ffdb04f00e`。
+
+## 基本信息
+
 - 模组名称：`Writable Book Wiki`
 - MODID：`writablebookwiki`
 - Java：21
@@ -73,4 +83,4 @@
 
 Linux／macOS 使用 `./gradlew`。正式 Mod JAR 位于 `neoforge/build/libs/`，命名格式为 `Writable Book Wiki-<版本>-NeoForge-1.21.1.jar`；不要把 `-sources.jar` 当作游戏 Mod 安装。
 
-本库包含源码、构建文件、自动测试、测试资源及本说明；不包含玩家存档、个人配置、缓存或开发运行环境。
+本库包含源码、构建文件、自动测试、测试资源、本说明，以及 `downloads/` 中可直接安装的成品 JAR；不包含玩家存档、个人配置、缓存或开发运行环境。
