@@ -1,13 +1,13 @@
 package com.writablebookwiki.local;
 
+import com.writablebookwiki.local.storage.AtomicFiles;
+
 import com.writablebookwiki.core.book.BookPointer;
 import com.writablebookwiki.core.document.WikiDocument;
 import com.writablebookwiki.core.document.WikiDocumentCodec;
 import java.io.IOException;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -71,22 +71,7 @@ public final class FileDocumentCache {
                 return;
             }
         }
-        Path temporary = Files.createTempFile(directory, "document-", ".part");
-        boolean completed = false;
-        try {
-            Files.write(temporary, codec.encode(document));
-            try {
-                Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE,
-                        StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException exception) {
-                Files.move(temporary, destination, StandardCopyOption.REPLACE_EXISTING);
-            }
-            completed = true;
-        } finally {
-            if (!completed) {
-                Files.deleteIfExists(temporary);
-            }
-        }
+        AtomicFiles.writeBytes(destination, codec.encode(document));
     }
 
     private Path cacheFile(String contentHash) {

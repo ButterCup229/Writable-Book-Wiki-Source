@@ -11,6 +11,16 @@ public final class WritableBookWikiServerGameEvents {
     }
 
     @SubscribeEvent
+    public static void onLogout(net.neoforged.neoforge.event.entity.player.PlayerEvent.PlayerLoggedOutEvent event) {
+        BookNetwork.disconnectPlayer(event.getEntity().getUUID());
+    }
+
+    @SubscribeEvent
+    public static void onStopped(net.neoforged.neoforge.event.server.ServerStoppedEvent event) {
+        BookNetwork.stopServer();
+    }
+
+    @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
         BookNetwork.expireServerTransfers(event.getServer());
         BookNetwork.deliverQueuedTransfers(event.getServer());

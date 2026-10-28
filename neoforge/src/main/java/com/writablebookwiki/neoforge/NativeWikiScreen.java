@@ -1,5 +1,12 @@
 package com.writablebookwiki.neoforge;
 
+import com.writablebookwiki.neoforge.PageLayoutEngine.*;
+import com.writablebookwiki.neoforge.client.editor.EditorCommand;
+import com.writablebookwiki.neoforge.client.editor.EditorRibbon;
+import static com.writablebookwiki.neoforge.PageLayoutEngine.frameInset;
+import static com.writablebookwiki.neoforge.PageLayoutEngine.styled;
+import static com.writablebookwiki.neoforge.PageLayoutEngine.TABLE_CELL_PADDING;
+
 import com.writablebookwiki.core.document.Block;
 import com.writablebookwiki.core.document.BlockFrame;
 import com.writablebookwiki.core.document.RichTextBlock;
@@ -24,7 +31,6 @@ import com.writablebookwiki.core.document.TableRow;
 import com.writablebookwiki.core.document.TextRun;
 import com.writablebookwiki.core.document.TextFlowLayout;
 import com.writablebookwiki.core.document.TextNavigation;
-import com.writablebookwiki.core.document.PlainTextEditor;
 import java.util.function.UnaryOperator;
 import com.writablebookwiki.core.document.TextSelection;
 import com.writablebookwiki.core.document.TextStyle;
@@ -40,7 +46,8 @@ import com.writablebookwiki.local.WindowsClipboardImageImport;
 import com.writablebookwiki.local.LocalAnnotationStore;
 import com.writablebookwiki.local.LocalAppearanceStore;
 import com.writablebookwiki.local.LocalTextAnnotation;
-import com.writablebookwiki.local.AnnotationEditHistory;
+import com.writablebookwiki.local.annotation.AnnotationWorkspace;
+import com.writablebookwiki.local.annotation.AnnotationWorkspace.Anchor;
 import java.io.IOException;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
@@ -80,8 +87,6 @@ final class NativeWikiScreen extends Screen {
     /** Tight hit areas for the unobtrusive edge arrows. */
     private static final int MODULE_TOGGLE_WIDTH = 7;
     private static final int MODULE_TOGGLE_HEIGHT = 12;
-    private static final int TABLE_CELL_PADDING = 4;
-    private static final int TABLE_ROW_HEIGHT = 20;
     private static final int OUTER_PADDING = 5;
     private static final int PAPER_INSET = 5;
     private static final int COLUMN_GAP = 10;
@@ -139,7 +144,7 @@ final class NativeWikiScreen extends Screen {
     private final DocumentSession session;
     private final IntConsumer pageChanged;
     private final Runnable onClosed;
-    private final LocalAnnotationStore annotationStore;
+    private final AnnotationWorkspace annotationWorkspace;
     private DocumentMode mode;
     private int pageIndex;
     private int bodyScroll;
@@ -167,7 +172,9 @@ final class NativeWikiScreen extends Screen {
     private boolean pagePickerOpen;
     private String pagePickerInput = "";
     private ToolbarMenu toolbarMenu = ToolbarMenu.NONE;
-    private int ribbonTab;
+    private final EditorRibbon ribbon = new EditorRibbon();
+    private static final EditorRibbon.Palette RIBBON_COLORS = new EditorRibbon.Palette(
+            BODY_TEXT_COLOR, HEADING_COLOR, DISABLED_COLOR, BookEditorChrome.ACCENT);
     private EditBox linkInput;
     private EditBox colorInput;
     private final LocalAppearanceStore appearanceStore;
@@ -200,27 +207,17 @@ final class NativeWikiScreen extends Screen {
     private int moduleDragStartX;
     private int moduleDragStartWidth;
     private int bodyScrollDragOffset = -1;
-    /** Local-only comments always point at a selected document range. */
-    private List<LocalTextAnnotation> annotations = List.of();
-    private final AnnotationEditHistory annotationHistory = new AnnotationEditHistory();
-    private WikiDocument annotationDocument;
-    private WikiDocument annotationKeyDocument;
-    private String annotationKeyNamespace;
-    private String cachedAnnotationKey;
     private boolean deselectImageOnClick;
-    private boolean commentComposerOpen;
-    private PendingAnnotation pendingAnnotation;
-    private final PlainTextEditor commentEditor = new PlainTextEditor();
+    /** Focus and highlight only; comment drafts and persistence belong to AnnotationWorkspace. */
     private boolean selectingCommentText;
     private int selectedAnnotationIndex = -1;
-    /** -1 is a newly created local comment; otherwise this is an in-place edit. */
-    private int editingAnnotationIndex = -1;
 
     private WikiDocument laidOutDocument;
     private int laidOutPage = -1;
     private int laidOutWidth = -1;
     /** A late image transfer changes real image dimensions and must reflow the page. */
     private long laidOutImageTextureGeneration = -1L;
+    private double laidOutGuiScale;
     private List<LayoutLine> layoutLines = List.of();
     private List<ImageLayout> imageLayouts = List.of();
     private List<TableLayout> tableLayouts = List.of();
@@ -243,7 +240,9 @@ final class NativeWikiScreen extends Screen {
         this.pageChanged = Objects.requireNonNull(pageChanged, "pageChanged");
         this.onClosed = Objects.requireNonNull(onClosed, "onClosed");
         this.pageIndex = clampPage(initialPage);
-        this.annotationStore = new LocalAnnotationStore(com.writablebookwiki.local.StoragePaths.dataRoot(FMLPaths.CONFIGDIR.get()).resolve("annotations"));
+        this.annotationWorkspace = new AnnotationWorkspace(editor.document(), session.personalAnnotationKey(),
+                new LocalAnnotationStore(com.writablebookwiki.local.StoragePaths.dataRoot(FMLPaths.CONFIGDIR.get()).resolve("annotations")));
+        if (annotationWorkspace.loadFailed()) status("本地注释读取失败，原文件已保留");
         this.appearanceStore = new LocalAppearanceStore(com.writablebookwiki.local.StoragePaths.dataRoot(FMLPaths.CONFIGDIR.get()).resolve("appearance.properties"));
         try { this.paperColorRgb = appearanceStore.loadPaperColor(); }
         catch (IOException ignored) { /* A local preference must never stop a book opening. */ }
@@ -254,8 +253,6 @@ final class NativeWikiScreen extends Screen {
         annotationVisible = savedLayoutSettings.annotationVisible();
         directoryModuleWidth = savedLayoutSettings.directoryWidth();
         annotationModuleWidth = savedLayoutSettings.annotationWidth();
-        this.annotations = loadAnnotations();
-        this.annotationDocument = editor.document();
     }
 
     /** Convenience constructor for a reader that does not need host notifications. */
@@ -336,11 +333,19 @@ final class NativeWikiScreen extends Screen {
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (closeAfterSave) return true;
+        if (lockConfirmationOpen) {
+            if (button == GLFW.GLFW_MOUSE_BUTTON_LEFT)
+                handleLockConfirmationClick(bounds(), mouseX, mouseY);
+            return true;
+        }
         if (isColorMenu()) {
             if (button == GLFW.GLFW_MOUSE_BUTTON_LEFT) return handleColorPaletteClick(bounds(), mouseX, mouseY);
             if (button == GLFW.GLFW_MOUSE_BUTTON_RIGHT) closeToolbarMenu();
             return true;
         }
+        // Any outside click must persist the local draft before changing focus or opening a menu.
+        if (annotationWorkspace.editing() && !inAnnotation(bounds(), mouseX, mouseY)
+                && !closeCommentComposer()) return true;
         if (button == GLFW.GLFW_MOUSE_BUTTON_RIGHT) {
             tableContextMenu = null;
             imageContextMenu = null;
@@ -356,7 +361,7 @@ final class NativeWikiScreen extends Screen {
                 if (mouseY >= bounds.bodyTop() && mouseY < bounds.footerY()) {
                     TableCellHit table = tableCellAt(bounds, mouseX, mouseY);
                     if (table != null) {
-                        closeCommentComposer();
+                        if (!closeCommentComposer()) return true;
                         finishTitleEditing();
                         closeToolbarMenu();
                         editor.finishTextEdit();
@@ -376,16 +381,6 @@ final class NativeWikiScreen extends Screen {
             return super.mouseClicked(mouseX, mouseY, button);
         }
         Bounds bounds = bounds();
-        // A right-hand note is an independent local text area. Clicking any
-        // other part of the canvas returns keyboard focus to that part (most
-        // importantly, a paragraph) instead of leaving the note editor to
-        // consume the next character.
-        if (commentComposerOpen && !inAnnotation(bounds, mouseX, mouseY)) {
-            closeCommentComposer();
-        }
-        if (lockConfirmationOpen) {
-            return handleLockConfirmationClick(bounds, mouseX, mouseY);
-        }
         if (imageContextMenu != null) {
             if (handleImageContextMenuClick(bounds, mouseX, mouseY)) {
                 return true;
@@ -458,6 +453,10 @@ final class NativeWikiScreen extends Screen {
             requestModeToggle();
             return true;
         }
+        if (session.canTakeBook() && inRect(mouseX, mouseY, bounds.lockButtonX() - 8, bounds.headerY(), 42, 20)) {
+            if (closeCommentComposer()) session.takeBook();
+            return true;
+        }
         if (session.canChangeLock() && inRect(mouseX, mouseY, bounds.lockButtonX(), bounds.headerY(),
                 34, 20)) {
             return openLockConfirmation();
@@ -491,7 +490,7 @@ final class NativeWikiScreen extends Screen {
         if (inAnnotation(bounds, mouseX, mouseY)) {
             selectingCommentText = false;
             beginAnnotationInteraction(bounds, mouseX, mouseY);
-            selectingCommentText = commentComposerOpen;
+            selectingCommentText = annotationWorkspace.editing();
             return true;
         }
         if (mode.isEditable()) {
@@ -548,7 +547,7 @@ final class NativeWikiScreen extends Screen {
 
     @Override
     public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
-        if (closeAfterSave) return true;
+        if (closeAfterSave || lockConfirmationOpen) return true;
         if (bodyScrollDragOffset >= 0 && button == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
             updateBodyScrollbar(bounds(), mouseY);
             return true;
@@ -557,7 +556,7 @@ final class NativeWikiScreen extends Screen {
             if (colorInput != null) colorInput.mouseDragged(mouseX, mouseY, button, dragX, dragY);
             return true;
         }
-        if (selectingCommentText && commentComposerOpen && button == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
+        if (selectingCommentText && annotationWorkspace.editing() && button == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
             beginAnnotationInteraction(bounds(), mouseX, mouseY);
             return true;
         }
@@ -623,7 +622,7 @@ final class NativeWikiScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
-        if (isColorMenu()) return true;
+        if (closeAfterSave || lockConfirmationOpen || isColorMenu()) return true;
         tableContextMenu = null;
         Bounds bounds = bounds();
         int delta = (int) Math.round(verticalAmount * 18.0);
@@ -654,18 +653,18 @@ final class NativeWikiScreen extends Screen {
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
         if (closeAfterSave) return true;
-        if (tableContextMenu != null) {
-            tableContextMenu = null;
-            if (keyCode == GLFW.GLFW_KEY_ESCAPE) return true;
-        }
-        if (commentComposerOpen && handleCommentComposerKey(keyCode, modifiers)) {
-            return true;
-        }
         if (lockConfirmationOpen) {
             if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
                 lockConfirmationOpen = false;
                 return true;
             }
+            return true;
+        }
+        if (tableContextMenu != null) {
+            tableContextMenu = null;
+            if (keyCode == GLFW.GLFW_KEY_ESCAPE) return true;
+        }
+        if (annotationWorkspace.editing() && handleCommentComposerKey(keyCode, modifiers)) {
             return true;
         }
         if (imageContextMenu != null && keyCode == GLFW.GLFW_KEY_ESCAPE) {
@@ -690,6 +689,8 @@ final class NativeWikiScreen extends Screen {
                 && handleToolbarMenuKey(keyCode, modifiers)) {
             return true;
         }
+        EditorCommand shortcut = EditorCommand.shortcut(keyCode, modifiers);
+        if (mode.isEditable() && shortcut != null) return performCommand(shortcut, true);
         if (mode.isEditable() && tableCellCaret != null && handleTableCellKey(keyCode, modifiers)) {
             return true;
         }
@@ -706,10 +707,6 @@ final class NativeWikiScreen extends Screen {
                 selectedImageBlock = -1;
                 status("图片选择已失效，请重新点击图片后删除");
             }
-            return true;
-        }
-        if (mode.isEditable() && toolbarMenu != ToolbarMenu.NONE
-                && handleToolbarMenuKey(keyCode, modifiers)) {
             return true;
         }
         if (mode.isEditable() && handleEditKey(keyCode, modifiers)) {
@@ -750,9 +747,9 @@ final class NativeWikiScreen extends Screen {
 
     @Override
     public boolean charTyped(char codePoint, int modifiers) {
-        if (closeAfterSave) return true;
+        if (closeAfterSave || lockConfirmationOpen) return true;
         if (tableContextMenu != null) return true;
-        if (commentComposerOpen) {
+        if (annotationWorkspace.editing()) {
             if ((modifiers & GLFW.GLFW_MOD_CONTROL) == 0 && !Character.isISOControl(codePoint)) {
                 replaceCommentComposerAtCaret(String.valueOf(codePoint));
             }
@@ -845,7 +842,7 @@ final class NativeWikiScreen extends Screen {
         if (closeAfterSave) return;
         saveLayoutSettings();
         finishTitleEditing();
-        closeCommentComposer();
+        if (!closeCommentComposer()) return;
         editor.finishTextEdit();
         if (hasUnsavedContent() || saveInProgress) {
             if (!session.canEdit()) { status("没有保存权限，编辑内容仍保留"); return; }
@@ -895,6 +892,7 @@ final class NativeWikiScreen extends Screen {
             status("只有创造模式可以锁定或解除锁定");
             return true;
         }
+        if (!closeCommentComposer()) return true;
         finishTitleEditing();
         editor.finishTextEdit();
         closeToolbarMenu();
@@ -942,14 +940,9 @@ final class NativeWikiScreen extends Screen {
             status("请先缩小或隐藏目录，为备注留出空间；正文纸宽固定");
             return true;
         }
-        // The range is an invisible placement anchor, not text that becomes
-        // part of the player's local note. Notes contain only what the player
-        // writes in the right-hand area.
-        pendingAnnotation = new PendingAnnotation(selected.startBlock(), selected.startColumn(),
-                selected.endBlock(), selected.endColumn(), "");
-        commentEditor.reset("");
-        editingAnnotationIndex = -1;
-        commentComposerOpen = true;
+        if (!closeCommentComposer()) return true;
+        annotationWorkspace.begin(new Anchor(selected.startBlock(), selected.startColumn(),
+                selected.endBlock(), selected.endColumn(), ""));
         annotationVisible = true;
         annotationScroll = 0;
         return true;
@@ -957,16 +950,13 @@ final class NativeWikiScreen extends Screen {
 
     /** Reopens the clicked comment in place, retaining its original document anchor. */
     private void beginExistingCommentEditing(int annotationIndex) {
-        if (annotationIndex < 0 || annotationIndex >= annotations.size()) {
-            return;
-        }
-        LocalTextAnnotation annotation = annotations.get(annotationIndex);
-        pendingAnnotation = new PendingAnnotation(annotation.startBlock(), annotation.startColumn(),
-                annotation.endBlock(), annotation.endColumn(), "");
-        commentEditor.reset(annotation.comment());
-        editingAnnotationIndex = annotationIndex;
-        selectedAnnotationIndex = annotationIndex;
-        commentComposerOpen = true;
+        if (annotationIndex < 0 || annotationIndex >= annotationWorkspace.entries().size()) return;
+        LocalTextAnnotation annotation = annotationWorkspace.entries().get(annotationIndex);
+        if (!closeCommentComposer()) return;
+        int currentIndex = annotationWorkspace.entries().indexOf(annotation);
+        if (currentIndex < 0) return;
+        annotationWorkspace.edit(currentIndex);
+        selectedAnnotationIndex = currentIndex;
         annotationVisible = true;
         showAnnotation(annotation);
     }
@@ -989,7 +979,7 @@ final class NativeWikiScreen extends Screen {
         }
         if (row >= card.commentStartRow()
                 && row < card.commentStartRow() + card.inputLines().size()) {
-            commentEditor.moveTo(commentComposerCaretAt(card, mouseX, row, bounds.annotationX() + 6),
+            annotationWorkspace.input().moveTo(commentComposerCaretAt(card, mouseX, row, bounds.annotationX() + 6),
                     selectingCommentText || hasShiftDown());
         }
     }
@@ -998,7 +988,7 @@ final class NativeWikiScreen extends Screen {
         int visualLine = row - card.commentStartRow();
         List<CommentInputLine> lines = card.inputLines();
         if (visualLine < 0 || visualLine >= lines.size()) {
-            return commentEditor.text().length();
+            return annotationWorkspace.input().text().length();
         }
         CommentInputLine line = lines.get(visualLine);
         int cursor = line.start();
@@ -1025,12 +1015,12 @@ final class NativeWikiScreen extends Screen {
             return true;
         }
         if (control) {
-            if (keyCode == GLFW.GLFW_KEY_A) { commentEditor.selectAll(); return true; }
+            if (keyCode == GLFW.GLFW_KEY_A) { annotationWorkspace.input().selectAll(); return true; }
             if ((keyCode == GLFW.GLFW_KEY_C || keyCode == GLFW.GLFW_KEY_X) && minecraft != null) {
-                if (commentEditor.hasSelection()) {
-                    minecraft.keyboardHandler.setClipboard(commentEditor.selectedText());
+                if (annotationWorkspace.input().hasSelection()) {
+                    minecraft.keyboardHandler.setClipboard(annotationWorkspace.input().selectedText());
                     if (keyCode == GLFW.GLFW_KEY_X) {
-                        commentEditor.replaceSelection("");
+                        annotationWorkspace.input().replaceSelection("");
                         persistCommentComposer();
                     }
                 }
@@ -1041,149 +1031,72 @@ final class NativeWikiScreen extends Screen {
                 return true;
             }
             if (keyCode == GLFW.GLFW_KEY_Z || keyCode == GLFW.GLFW_KEY_Y) {
-                if (keyCode == GLFW.GLFW_KEY_Y || shift) commentEditor.redo();
-                else commentEditor.undo();
+                if (keyCode == GLFW.GLFW_KEY_Y || shift) annotationWorkspace.input().redo();
+                else annotationWorkspace.input().undo();
                 persistCommentComposer();
                 return true;
             }
             if (keyCode == GLFW.GLFW_KEY_S) { persistCommentComposer(); return true; }
         }
         if (keyCode == GLFW.GLFW_KEY_BACKSPACE || keyCode == GLFW.GLFW_KEY_DELETE) {
-            commentEditor.delete(keyCode == GLFW.GLFW_KEY_BACKSPACE ? -1 : 1, control);
+            annotationWorkspace.input().delete(keyCode == GLFW.GLFW_KEY_BACKSPACE ? -1 : 1, control);
             persistCommentComposer();
         } else if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
             replaceCommentComposerAtCaret("\n");
         } else if (keyCode == GLFW.GLFW_KEY_LEFT || keyCode == GLFW.GLFW_KEY_RIGHT) {
-            commentEditor.move(keyCode == GLFW.GLFW_KEY_LEFT ? -1 : 1, shift, control);
+            annotationWorkspace.input().move(keyCode == GLFW.GLFW_KEY_LEFT ? -1 : 1, shift, control);
         } else if (keyCode == GLFW.GLFW_KEY_HOME || keyCode == GLFW.GLFW_KEY_END
                 || keyCode == GLFW.GLFW_KEY_UP || keyCode == GLFW.GLFW_KEY_DOWN) {
             List<CommentInputLine> lines = commentInputLines(Math.max(20, bounds().annotationWidth() - 12));
             int current = 0;
-            for (int i = 0; i < lines.size(); i++) if (lines.get(i).start() <= commentEditor.caret()) current = i;
+            for (int i = 0; i < lines.size(); i++) if (lines.get(i).start() <= annotationWorkspace.input().caret()) current = i;
             CommentInputLine line = lines.get(current);
             int target;
             if (keyCode == GLFW.GLFW_KEY_HOME) target = control ? 0 : line.start();
-            else if (keyCode == GLFW.GLFW_KEY_END) target = control ? commentEditor.text().length() : line.end();
+            else if (keyCode == GLFW.GLFW_KEY_END) target = control ? annotationWorkspace.input().text().length() : line.end();
             else {
                 int next = clamp(current + (keyCode == GLFW.GLFW_KEY_UP ? -1 : 1), 0, lines.size() - 1);
-                target = Math.min(lines.get(next).end(), lines.get(next).start() + commentEditor.caret() - line.start());
+                target = Math.min(lines.get(next).end(), lines.get(next).start() + annotationWorkspace.input().caret() - line.start());
             }
-            commentEditor.moveTo(target, shift);
+            annotationWorkspace.input().moveTo(target, shift);
         }
         return true;
     }
 
     private void replaceCommentComposerAtCaret(String input) {
         String safe = sanitiseCommentInput(input);
-        if (!safe.isEmpty() && commentEditor.replaceSelection(safe)) persistCommentComposer();
+        if (!safe.isEmpty() && annotationWorkspace.input().replaceSelection(safe)) persistCommentComposer();
     }
 
     /** Closes the local note editor only; every actual edit is already persisted. */
-    private void closeCommentComposer() {
-        if (!commentComposerOpen) {
-            return;
+    private boolean closeCommentComposer() {
+        if (!annotationWorkspace.editing()) return true;
+        try {
+            annotationWorkspace.close(session.personalAnnotationKey());
+            selectingCommentText = false;
+            return true;
+        } catch (IOException | IllegalArgumentException exception) {
+            status("本地注释保存失败，草稿仍保留，请重试");
+            return false;
         }
-        resetCommentComposer();
     }
 
     /** Writes the right-hand text area immediately, just like normal document input. */
     private void persistCommentComposer() {
-        annotationHistory.commentsChanged();
-        PendingAnnotation pending = pendingAnnotation;
-        if (!commentComposerOpen || pending == null) {
-            return;
-        }
-        List<LocalTextAnnotation> next = new ArrayList<>(annotations);
-        if (commentEditor.text().isBlank()) {
-            if (editingAnnotationIndex < 0 || editingAnnotationIndex >= next.size()) {
-                return;
-            }
-            next.remove(editingAnnotationIndex);
-            try {
-                annotationStore.saveTextAnnotations(annotationStorageKey(), sortAnnotations(next));
-                annotations = sortAnnotations(next);
-                selectedAnnotationIndex = -1;
-                editingAnnotationIndex = -1;
-            } catch (IOException | IllegalArgumentException exception) {
-                status("本地注释保存失败");
-            }
-            return;
-        }
-        LocalTextAnnotation saved = new LocalTextAnnotation(pending.startBlock(), pending.startColumn(), pending.endBlock(),
-                pending.endColumn(), pending.quotedText(), commentEditor.text());
-        if (editingAnnotationIndex >= 0 && editingAnnotationIndex < next.size()) {
-            next.set(editingAnnotationIndex, saved);
-        } else {
-            next.add(saved);
-        }
-        List<LocalTextAnnotation> sorted = sortAnnotations(next);
         try {
-            annotationStore.saveTextAnnotations(annotationStorageKey(), sorted);
-            annotations = sorted;
-            selectedAnnotationIndex = annotations.indexOf(saved);
-            editingAnnotationIndex = selectedAnnotationIndex;
+            annotationWorkspace.persistDraft(session.personalAnnotationKey());
+            selectedAnnotationIndex = annotationWorkspace.editingIndex();
         } catch (IOException | IllegalArgumentException exception) {
-            status("本地注释保存失败");
+            status("本地注释保存失败，草稿仍保留，请重试");
         }
-    }
-
-    private void resetCommentComposer() {
-        commentComposerOpen = false;
-        pendingAnnotation = null;
-        commentEditor.reset("");
-        selectingCommentText = false;
-        editingAnnotationIndex = -1;
     }
 
     private static String sanitiseCommentInput(String input) {
-        if (input == null || input.isEmpty()) {
-            return "";
-        }
-        StringBuilder safe = new StringBuilder(input.length());
-        for (int offset = 0; offset < input.length();) {
-            int codePoint = input.codePointAt(offset);
-            offset += Character.charCount(codePoint);
-            if (codePoint == '\n' || codePoint == '\r') {
-                if (safe.isEmpty() || safe.charAt(safe.length() - 1) != '\n') {
-                    safe.append('\n');
-                }
-            } else if (!Character.isISOControl(codePoint)) {
-                safe.appendCodePoint(codePoint);
-            }
-        }
-        return safe.toString();
-    }
-
-    private List<LocalTextAnnotation> loadAnnotations() {
-        try {
-            return sortAnnotations(annotationStore.loadVersionedTextAnnotations(session.personalAnnotationKey(),
-                    new WikiDocumentCodec().contentHash(editor.document())));
-        } catch (IOException | IllegalArgumentException exception) {
-            return List.of();
-        }
+        return sanitiseTableInput(input);
     }
 
     /** Word-style review panes follow the selected source text, not save time. */
-    private static List<LocalTextAnnotation> sortAnnotations(List<LocalTextAnnotation> source) {
-        List<LocalTextAnnotation> sorted = new ArrayList<>(source);
-        sorted.sort((left, right) -> {
-            int comparison = Integer.compare(left.startBlock(), right.startBlock());
-            if (comparison == 0) {
-                comparison = Integer.compare(left.startColumn(), right.startColumn());
-            }
-            if (comparison == 0) {
-                comparison = Integer.compare(left.endBlock(), right.endBlock());
-            }
-            if (comparison == 0) {
-                comparison = Integer.compare(left.endColumn(), right.endColumn());
-            }
-            if (comparison == 0) {
-                comparison = left.quotedText().compareTo(right.quotedText());
-            }
-            return comparison == 0 ? left.comment().compareTo(right.comment()) : comparison;
-        });
-        return List.copyOf(sorted);
-    }
+
 
     private void showAnnotation(LocalTextAnnotation annotation) {
         int count = NativeDocumentPresentation.pageCount(editor.document());
@@ -1286,20 +1199,15 @@ final class NativeWikiScreen extends Screen {
             }
             return true;
         }
-        if (control && keyCode == GLFW.GLFW_KEY_Z && !shift) {
-            if (editor.undo()) {
-                titleCaret = editor.document().title().length();
-                titleSelectionAnchor = titleCaret;
-                refreshAfterEdit();
-            }
-            return true;
+        EditorCommand command = EditorCommand.shortcut(keyCode, modifiers);
+        if (command == EditorCommand.SAVE) {
+            finishTitleEditing();
+            return performCommand(command, true);
         }
-        if (control && (keyCode == GLFW.GLFW_KEY_Y || (keyCode == GLFW.GLFW_KEY_Z && shift))) {
-            if (editor.redo()) {
-                titleCaret = editor.document().title().length();
-                titleSelectionAnchor = titleCaret;
-                refreshAfterEdit();
-            }
+        if (command == EditorCommand.UNDO || command == EditorCommand.REDO) {
+            performCommand(command, true);
+            titleCaret = editor.document().title().length();
+            titleSelectionAnchor = titleCaret;
             return true;
         }
         if (keyCode == GLFW.GLFW_KEY_HOME) {
@@ -1425,7 +1333,10 @@ final class NativeWikiScreen extends Screen {
         String modeNote = session.isLocked()
                 ? (mode == DocumentMode.READ ? "锁定·只读" : "锁定·编辑")
                 : (mode == DocumentMode.READ ? "只读" : "编辑");
-        if (session.canChangeLock()) {
+        if (session.canTakeBook()) {
+            drawButton(graphics, bounds.lockButtonX() - 8, bounds.headerY(), 42, 20, "取书",
+                    inRect(mouseX, mouseY, bounds.lockButtonX() - 8, bounds.headerY(), 42, 20));
+        } else if (session.canChangeLock()) {
             drawButton(graphics, bounds.lockButtonX(), bounds.headerY(), 34, 20,
                     session.isLocked() ? "解锁" : "锁定",
                     inRect(mouseX, mouseY, bounds.lockButtonX(), bounds.headerY(), 34, 20));
@@ -1475,7 +1386,7 @@ final class NativeWikiScreen extends Screen {
     }
 
     private boolean hasAnnotationModule() {
-        return commentComposerOpen || !annotations.isEmpty();
+        return annotationWorkspace.editing() || !annotationWorkspace.entries().isEmpty();
     }
 
     private void drawTitleEditor(GuiGraphics graphics, Bounds bounds) {
@@ -1632,7 +1543,7 @@ final class NativeWikiScreen extends Screen {
             graphics.drawString(font, "框选文字后右键添加注释", x, textTop, DISABLED_COLOR, false);
         }
         graphics.disableScissor();
-        String hint = commentComposerOpen ? "自动保存 · 点击正文切换输入" : "点击备注编辑并定位原文";
+        String hint = annotationWorkspace.editing() ? "自动保存 · 点击正文切换输入" : "点击备注编辑并定位原文";
         drawRight(graphics, hint, bounds.annotationX() + bounds.annotationWidth() - 6,
                 bounds.footerY() - 14, DISABLED_COLOR);
     }
@@ -1642,23 +1553,23 @@ final class NativeWikiScreen extends Screen {
         for (int index = 0; index < card.inputLines().size(); index++) {
             CommentInputLine line = card.inputLines().get(index);
             int y = textTop + (card.commentStartRow() + index) * directoryLineHeight() - annotationScroll;
-            if (commentEditor.text().isEmpty()) {
+            if (annotationWorkspace.input().text().isEmpty()) {
                 graphics.drawString(font, "输入本地评语…", x, y, DISABLED_COLOR, false);
                 drawCaret(graphics, x, y, font.lineHeight + 1);
             } else {
-                int selectionStart = Math.max(line.start(), commentEditor.start());
-                int selectionEnd = Math.min(line.end(), commentEditor.end());
+                int selectionStart = Math.max(line.start(), annotationWorkspace.input().start());
+                int selectionEnd = Math.min(line.end(), annotationWorkspace.input().end());
                 if (selectionStart < selectionEnd) {
                     int left = font.width(line.text().substring(0, selectionStart - line.start()));
                     int right = font.width(line.text().substring(0, selectionEnd - line.start()));
                     graphics.fill(x + left, y - 1, x + right, y + font.lineHeight + 1, SELECTION_COLOR);
                 }
                 graphics.drawString(font, line.text(), x, y, BODY_TEXT_COLOR, false);
-                boolean caretOnLine = commentEditor.caret() >= line.start()
-                        && (commentEditor.caret() < line.end()
-                        || index == card.inputLines().size() - 1 && commentEditor.caret() == line.end());
+                boolean caretOnLine = annotationWorkspace.input().caret() >= line.start()
+                        && (annotationWorkspace.input().caret() < line.end()
+                        || index == card.inputLines().size() - 1 && annotationWorkspace.input().caret() == line.end());
                 if (caretOnLine) {
-                    int localEnd = Math.max(0, Math.min(line.text().length(), commentEditor.caret() - line.start()));
+                    int localEnd = Math.max(0, Math.min(line.text().length(), annotationWorkspace.input().caret() - line.start()));
                     drawCaret(graphics, x + font.width(line.text().substring(0, localEnd)), y, font.lineHeight + 1);
                 }
             }
@@ -1668,16 +1579,16 @@ final class NativeWikiScreen extends Screen {
     /** Produces the visual right-hand review pane in document-anchor order. */
     private List<AnnotationCardLayout> annotationCardLayouts(int availableWidth) {
         List<AnnotationCardSource> sources = new ArrayList<>();
-        for (int index = 0; index < annotations.size(); index++) {
-            if (index == editingAnnotationIndex) {
+        for (int index = 0; index < annotationWorkspace.entries().size(); index++) {
+            if (index == annotationWorkspace.editingIndex()) {
                 continue;
             }
-            LocalTextAnnotation annotation = annotations.get(index);
-            sources.add(new AnnotationCardSource(index, new PendingAnnotation(annotation.startBlock(), annotation.startColumn(),
+            LocalTextAnnotation annotation = annotationWorkspace.entries().get(index);
+            sources.add(new AnnotationCardSource(index, new Anchor(annotation.startBlock(), annotation.startColumn(),
                     annotation.endBlock(), annotation.endColumn(), annotation.quotedText()), annotation.comment(), false));
         }
-        if (commentComposerOpen && pendingAnnotation != null) {
-            sources.add(new AnnotationCardSource(editingAnnotationIndex, pendingAnnotation, commentEditor.text(), true));
+        if (annotationWorkspace.editing() && annotationWorkspace.anchor() != null) {
+            sources.add(new AnnotationCardSource(annotationWorkspace.editingIndex(), annotationWorkspace.anchor(), annotationWorkspace.input().text(), true));
         }
         sources.sort((left, right) -> {
             int comparison = compareAnnotationAnchors(left.anchor(), right.anchor());
@@ -1721,7 +1632,7 @@ final class NativeWikiScreen extends Screen {
         return null;
     }
 
-    private static int compareAnnotationAnchors(PendingAnnotation left, PendingAnnotation right) {
+    private static int compareAnnotationAnchors(Anchor left, Anchor right) {
         int comparison = Integer.compare(left.startBlock(), right.startBlock());
         if (comparison == 0) {
             comparison = Integer.compare(left.startColumn(), right.startColumn());
@@ -1763,8 +1674,8 @@ final class NativeWikiScreen extends Screen {
     private List<AnnotationDisplayLine> annotationDisplayLines(int availableWidth) {
         List<AnnotationDisplayLine> result = new ArrayList<>();
         int visualIndex = 0;
-        for (int index = 0; index < annotations.size(); index++) {
-            LocalTextAnnotation annotation = annotations.get(index);
+        for (int index = 0; index < annotationWorkspace.entries().size(); index++) {
+            LocalTextAnnotation annotation = annotationWorkspace.entries().get(index);
             visualIndex = appendAnnotationDisplayText(result, index, "「" + annotation.quotedText() + "」",
                     true, visualIndex, availableWidth);
             visualIndex = appendAnnotationDisplayText(result, index, annotation.comment(), false, visualIndex,
@@ -1811,9 +1722,9 @@ final class NativeWikiScreen extends Screen {
         int visualIndex = 0;
         StringBuilder line = new StringBuilder();
         int lineWidth = 0;
-        while (offset < commentEditor.text().length()) {
+        while (offset < annotationWorkspace.input().text().length()) {
             int characterStart = offset;
-            int codePoint = commentEditor.text().codePointAt(offset);
+            int codePoint = annotationWorkspace.input().text().codePointAt(offset);
             String character = new String(Character.toChars(codePoint));
             offset += Character.charCount(codePoint);
             if (codePoint == '\n') {
@@ -1833,17 +1744,17 @@ final class NativeWikiScreen extends Screen {
             line.append(character);
             lineWidth += characterWidth;
         }
-        result.add(new CommentInputLine(start, commentEditor.text().length(), line.toString(), visualIndex));
+        result.add(new CommentInputLine(start, annotationWorkspace.input().text().length(), line.toString(), visualIndex));
         return result;
     }
 
     /** Draws the local-only red dotted leaders in the whitespace between the papers. */
     private void drawAnnotationConnectors(GuiGraphics graphics, Bounds bounds) {
-        if (!bounds.annotationVisible() || annotations.isEmpty()) {
+        if (!bounds.annotationVisible() || annotationWorkspace.entries().isEmpty()) {
             return;
         }
         ensureLayout(bounds.bodyWidth());
-        int[] targetY = new int[annotations.size()];
+        int[] targetY = new int[annotationWorkspace.entries().size()];
         java.util.Arrays.fill(targetY, -1);
         int annotationTextTop = bounds.bodyTop() + 5 + directoryLineHeight() + 3;
         for (AnnotationCardLayout card : annotationCardLayouts(Math.max(20, bounds.annotationWidth() - 12))) {
@@ -1858,7 +1769,7 @@ final class NativeWikiScreen extends Screen {
             if (lineY + line.height() < bounds.bodyTop() || lineY >= bounds.footerY()) {
                 continue;
             }
-            int[] anchorX = new int[annotations.size()];
+            int[] anchorX = new int[annotationWorkspace.entries().size()];
             java.util.Arrays.fill(anchorX, -1);
             int cursorX = bounds.bodyX() + line.indent();
             for (Fragment fragment : line.fragments()) {
@@ -2138,223 +2049,34 @@ final class NativeWikiScreen extends Screen {
 
     private void ensureLayout(int bodyWidth) {
         WikiDocument document = editor.document();
-        long imageTextureGeneration = WikiImageTextures.generation();
+        long imageGeneration = WikiImageTextures.generation();
+        double guiScale = minecraft == null ? 1.0 : Math.max(1.0, minecraft.getWindow().getGuiScale());
         if (document == laidOutDocument && pageIndex == laidOutPage && bodyWidth == laidOutWidth
-                && imageTextureGeneration == laidOutImageTextureGeneration) {
+                && imageGeneration == laidOutImageTextureGeneration && guiScale == laidOutGuiScale) {
             return;
         }
+        PageLayoutEngine engine = new PageLayoutEngine(document, font, collapsedBlocks,
+                hash -> WikiImageTextures.get(hash).orElse(null), guiScale,
+                imageResize == null ? null : new PageLayoutEngine.ResizePreview(imageResize.blockIndex(),
+                        imageResize.previewWidth(), imageResize.previewX(), imageResize.previewY()),
+                imageMove == null ? null : new PageLayoutEngine.MovePreview(imageMove.blockIndex(),
+                        imageMove.startImageX() + imageMove.deltaX(), imageMove.startImageY() + imageMove.deltaY()));
+        PageLayoutEngine.Snapshot layout = engine.layout(pageIndex, bodyWidth);
+        layoutLines = layout.lines();
+        imageLayouts = layout.images();
+        tableLayouts = layout.tables();
+        frameLayouts = layout.frames();
+        contentHeight = layout.contentHeight();
+        // Publish the cache key only after a complete successful measurement.
         laidOutDocument = document;
         laidOutPage = pageIndex;
         laidOutWidth = bodyWidth;
-        laidOutImageTextureGeneration = imageTextureGeneration;
-        List<LayoutLine> result = new ArrayList<>();
-        List<ImageLayout> renderedImages = new ArrayList<>();
-        List<TableLayout> renderedTables = new ArrayList<>();
-        List<FrameLayout> renderedFrames = new ArrayList<>();
-        List<TextFlowExclusion> wrappingImages = new ArrayList<>();
-        int y = 0;
-        DocumentPages.PageRange pageRange = DocumentPages.range(document, pageIndex);
-
-        // Word treats every non-inline image as a page object first, not as a
-        // paragraph-sized block.  Resolve those objects before measuring any
-        // prose so an image moved into the middle of an existing paragraph
-        // makes that prose flow on both its left and its right.
-        for (int blockIndex = pageRange.startInclusive(); blockIndex < pageRange.endExclusive(); blockIndex++) {
-            Block block = document.blocks().get(blockIndex);
-            if (block instanceof ImageBlock image && image.frame() == null && image.layoutMode() != ImageLayoutMode.INLINE) {
-                ImageAppend positioned = appendImage(renderedImages, 0, blockIndex, image, bodyWidth);
-                if (positioned.flowExclusion() != null) {
-                    wrappingImages.add(positioned.flowExclusion());
-                }
-            }
-        }
-        int frameStart = -1, frameEnd = -1, frameY = 0, frameFirstLine = 0, frameFirstImage = 0, frameFirstTable = 0, frameFirstExclusion = 0;
-        for (int blockIndex = pageRange.startInclusive(); blockIndex < pageRange.endExclusive(); blockIndex++) {
-            Block block = document.blocks().get(blockIndex);
-            BlockFrame frame = block.frame();
-            if (frame != null && blockIndex > frameEnd) {
-                y = advancePastWrappingImages(y, wrappingImages);
-                frameStart = blockIndex; frameEnd = blockIndex;
-                while (frameEnd + 1 < pageRange.endExclusive() && frame.equals(document.blocks().get(frameEnd + 1).frame())) frameEnd++;
-                frameY = y; frameFirstLine = result.size(); frameFirstImage = renderedImages.size(); frameFirstTable = renderedTables.size();
-                frameFirstExclusion = wrappingImages.size();
-                y += 4;
-                for (int member = frameStart; member <= frameEnd; member++) {
-                    if (document.blocks().get(member) instanceof ImageBlock image && image.layoutMode() != ImageLayoutMode.INLINE) {
-                        ImageAppend positioned = appendImage(renderedImages, y, member, image,
-                                bodyWidth - frameInset(frame) - 12, frameInset(frame), y);
-                        if (positioned.flowExclusion() != null) wrappingImages.add(positioned.flowExclusion());
-                    }
-                }
-            }
-            int firstLine = result.size();
-            if (block instanceof Heading heading) {
-                y = appendTextBlock(result, y, blockIndex, heading.runs(), bodyWidth, headingIndent(heading.level()),
-                        false, headingScale(heading.level()), true, wrappingImages);
-            } else if (block instanceof RichTextBlock rich) {
-                if (rich.alignment() != RichTextBlock.Alignment.LEFT) y = advancePastWrappingImages(y, wrappingImages);
-                y = appendRichBlock(result, y, blockIndex, rich, bodyWidth, wrappingImages);
-            } else if (block instanceof HorizontalRule) {
-                y = advancePastWrappingImages(y, wrappingImages);
-                result.add(new LayoutLine(blockIndex, 0, 0, y, 12, 0, false, List.of()));
-                y += 18;
-            } else if (block instanceof Paragraph paragraph) {
-                y = appendTextBlock(result, y, blockIndex, paragraph.runs(), bodyWidth, 0, false, 1f, false,
-                        wrappingImages);
-            } else if (block instanceof QuoteBlock quote) {
-                y = appendTextBlock(result, y, blockIndex, quote.runs(), bodyWidth, 8, true, 1f, false,
-                        wrappingImages);
-                if (!quote.source().isBlank()) {
-                    y = appendTextBlock(result, y - 2, -1,
-                            List.of(new TextRun("— " + quote.source(), new TextStyle(false, true, false, 0x62594E, 10))),
-                            bodyWidth, 14, true, 0.85f, false, wrappingImages);
-                }
-            } else if (block instanceof ImageBlock image) {
-                if (image.layoutMode() == ImageLayoutMode.INLINE) {
-                    y = appendImage(renderedImages, y, blockIndex, image,
-                            bodyWidth - (frame == null ? 0 : frameInset(frame) + 12),
-                            frameInset(frame), frame == null ? 0 : frameY + 4).nextY();
-                }
-            } else if (block instanceof TableBlock table) {
-                // Tables remain block-level in this phase.  Do not let one
-                // accidentally paint through a square-wrapped picture.
-                y = advancePastWrappingImages(y, wrappingImages);
-                y = appendTable(renderedTables, y, blockIndex, table, bodyWidth, wrappingImages);
-            }
-            if (collapsedBlocks.contains(blockIndex) && canFold(blockIndex) && result.size() > firstLine + 1) {
-                LayoutLine summary = result.get(firstLine);
-                result.subList(firstLine + 1, result.size()).clear();
-                y = summary.y() + summary.height() + 7;
-            }
-            if (frame != null && blockIndex == frameEnd) {
-                for (int i = frameFirstImage; i < renderedImages.size(); i++) {
-                    ImageLayout image = renderedImages.get(i);
-                    y = Math.max(y, image.y() + image.height() + 4);
-                }
-                boolean foldable = frameEnd > frameStart || result.size() > frameFirstLine + 1;
-                if (frameEnd == frameStart && block instanceof RichTextBlock rich && rich.isTask()) foldable = false;
-                if (foldable && collapsedBlocks.contains(frameStart)) {
-                    LayoutLine summary = result.size() > frameFirstLine ? result.get(frameFirstLine) : null;
-                    result.subList(frameFirstLine, result.size()).clear();
-                    if (summary != null) result.add(new LayoutLine(frameStart, summary.startColumn(), summary.endColumn(),
-                            frameY + 7, summary.height(), summary.indent(), false, summary.fragments()));
-                    renderedImages.subList(frameFirstImage, renderedImages.size()).clear();
-                    renderedTables.subList(frameFirstTable, renderedTables.size()).clear();
-                    y = frameY + (summary == null ? 14 : summary.height()) + 12;
-                }
-                // Images from this frame must never wrap unrelated text outside it.
-                wrappingImages.subList(frameFirstExclusion, wrappingImages.size()).clear();
-                renderedFrames.add(new FrameLayout(frameStart, frameEnd, frameY, y - frameY, frame, foldable));
-                y += 7;
-            }
-        }
-        layoutLines = List.copyOf(result);
-        imageLayouts = List.copyOf(renderedImages);
-        tableLayouts = List.copyOf(renderedTables);
-        frameLayouts = List.copyOf(renderedFrames);
-        int overlayBottom = 0;
-        for (ImageLayout image : imageLayouts) {
-            overlayBottom = Math.max(overlayBottom, image.y() + image.height());
-        }
-        contentHeight = Math.max(y, overlayBottom);
+        laidOutImageTextureGeneration = imageGeneration;
+        laidOutGuiScale = guiScale;
     }
 
-    private TextFlowLayout.Result flowText(List<TextRun> runs, int width, int indent, float scale,
-            int y, int gap, List<TextFlowExclusion> exclusions) {
-        return TextFlowLayout.layout(runs, Math.max(indent + 1, width), indent, scale, y, gap,
-                exclusions.stream().map(e -> new TextFlowLayout.Exclusion(
-                        e.gapStart(), e.topY(), e.gapEnd(), e.bottomY())).toList(),
-                new TextFlowLayout.Metrics() {
-                    @Override
-                    public float advance(String text, TextStyle style, float fontScale) {
-                        return font.width(styled(text, style)) * fontScale;
-                    }
-
-                    @Override
-                    public int height(float fontScale) {
-                        return Math.max(1, (int) Math.ceil(font.lineHeight * fontScale));
-                    }
-                });
-    }
-
-    private static List<Fragment> fragments(TextFlowLayout.Line line) {
-        return line.glyphs().stream().map(g -> new Fragment(g.text(), g.style(), g.scale(),
-                g.link(), g.start(), g.end(), g.x(), g.advance(), styled(g.text(), g.style()))).toList();
-    }
-
-    private int appendTextBlock(List<LayoutLine> result, int y, int blockIndex, List<TextRun> runs, int totalWidth,
-            int indent, boolean quote, float blockScale, boolean heading, List<TextFlowExclusion> flowExclusions) {
-        TextFlowLayout.Result layout = flowText(runs, totalWidth - (quote ? 7 : 0) - (canFold(blockIndex) ? 12 : 0),
-                indent, blockScale, y, 2, flowExclusions);
-        for (TextFlowLayout.Line line : layout.lines()) {
-            result.add(new LayoutLine(blockIndex, line.start(), line.end(), line.y(), line.height(),
-                    indent, quote, fragments(line)));
-        }
-        return layout.bottom() + (heading ? 5 : 4);
-    }
-
-    private int appendRichBlock(List<LayoutLine> result, int y, int index, RichTextBlock rich, int width,
-            List<TextFlowExclusion> exclusions) {
-        if (canFold(index)) width -= 12;
-        int indent = switch(rich.kind()) {
-            case BULLET, NUMBERED -> 24; case TASK -> 18; case QUOTE_TASK -> 24; case QUOTE, CODE -> 8;
-            case INFO, WARNING -> 14; case STEP -> 42; default -> 0;
-        };
-        if (rich.frame() != null) {
-            indent = frameInset(rich.frame()) + switch (rich.kind()) {
-                case TASK, QUOTE_TASK -> 14;
-                case BULLET, NUMBERED -> 24;
-                case STEP -> 42;
-                default -> 0;
-            };
-            width -= 8;
-        }
-        if (rich.isList()) indent = frameInset(rich.frame()) + listIndent(index, rich.kind());
-        float scale = rich.headingLevel() > 0 ? headingScale(rich.headingLevel()) : 1f;
-        if ((rich.isTask() || rich.isList()) && !exclusions.isEmpty()) {
-            // Wrapped pictures must avoid the checkbox/list marker as well as its text.
-            int markerGutter = rich.isTask() ? 14 : font.width(listMarkerLabel(index, rich.kind())) + 4;
-            exclusions = exclusions.stream().map(e -> new TextFlowExclusion(e.topY(), e.bottomY(), e.gapStart(), e.gapEnd() + markerGutter)).toList();
-            if (WikiDocumentEditor.blockText(rich).isEmpty()) y = advancePastWrappingImages(y, exclusions);
-        }
-        TextFlowLayout.Result flow = flowText(rich.runs(), width - 4, indent, scale, y + 3, 2, exclusions);
-        for (int i = 0; i < flow.lines().size(); i++) {
-            TextFlowLayout.Line line = flow.lines().get(i);
-            boolean last = i == flow.lines().size() - 1 || (line.end() < WikiDocumentEditor.blockText(rich).length()
-                    && WikiDocumentEditor.blockText(rich).charAt(line.end()) == '\n');
-            List<Fragment> fs = fragments(line);
-            float end = fs.isEmpty() ? indent : fs.getLast().x()+fs.getLast().advance();
-            float room = Math.max(0, width - 4 - end);
-            float shift = switch(rich.alignment()) { case CENTER -> room/2; case RIGHT -> room; default -> 0; };
-            int gaps = 0;
-            if(rich.alignment() == RichTextBlock.Alignment.JUSTIFY && !last) {
-                for(int n=0;n<fs.size()-1;n++) if(fs.get(n).text().isBlank()) gaps++;
-            }
-            boolean distribute = rich.alignment() == RichTextBlock.Alignment.JUSTIFY && !last;
-            boolean every = gaps == 0;
-            if(distribute && every) gaps = Math.max(0,fs.size()-1);
-            List<Fragment> aligned = new ArrayList<>();
-            float extra = shift;
-            for(int n=0;n<fs.size();n++) {
-                Fragment f=fs.get(n);
-                float advance=f.advance();
-                if(distribute && gaps>0 && n<fs.size()-1 && (every || f.text().isBlank())) advance += room/gaps;
-                aligned.add(new Fragment(f.text(),f.style(),f.scale(),f.link(),f.startColumn(),f.endColumn(),f.x()+extra,advance,f.painted()));
-                extra += advance-f.advance();
-            }
-            result.add(new LayoutLine(index,line.start(),line.end(),line.y(),line.height(),Math.round(indent+shift),false,aligned));
-        }
-        boolean continuesQuote = rich.isQuote() && index + 1 < editor.document().blocks().size()
-                && editor.document().blocks().get(index + 1) instanceof TextualBlock following
-                && RichTextBlock.from(following).isQuote();
-        return flow.bottom() + (rich.frame() != null || continuesQuote ? 3 : 7);
-    }
     private boolean canFold(int index) {
-        return index >= 0 && index < editor.document().blocks().size()
-                && editor.document().blocks().get(index).frame() == null
-                && editor.document().blocks().get(index) instanceof TextualBlock text
-                && !(text instanceof RichTextBlock rich && rich.isTask())
-                && WikiDocumentEditor.blockText(text).contains("\n");
+        return PageLayoutEngine.canFold(editor.document(), index);
     }
 
     private void drawBlockFoldControls(GuiGraphics g, Bounds b) {
@@ -2404,12 +2126,6 @@ final class NativeWikiScreen extends Screen {
         return new ContentControl(b.bodyX() + b.bodyVisibleWidth() - 12, b.bodyTop() + line.y() - bodyScroll, 12, 12);
     }
 
-    private record FrameLayout(int start, int end, int y, int height, BlockFrame frame, boolean foldable) { }
-
-    private static int frameInset(BlockFrame frame) {
-        return frame == null ? 0 : frame.kind() == BlockFrame.Kind.QUOTE ? 8 : 14;
-    }
-
     private ContentControl frameFoldControl(Bounds b, FrameLayout frame) {
         return new ContentControl(b.bodyX() + b.bodyVisibleWidth() - 12, b.bodyTop() + frame.y() + 4 - bodyScroll, 12, 12);
     }
@@ -2427,31 +2143,11 @@ final class NativeWikiScreen extends Screen {
     }
 
     private int blockNumber(int index, RichTextBlock.Kind kind) {
-        int count=1;
-        BlockFrame frame = editor.document().blocks().get(index).frame();
-        for(int i=index-1;i>=0;i--) {
-            Block block=editor.document().blocks().get(i);
-            if(block instanceof RichTextBlock r && r.kind()==kind && Objects.equals(frame, r.frame())) {count++;continue;}
-            break;
-        }
-        return count;
+        return PageLayoutEngine.blockNumber(editor.document(), index, kind);
     }
 
     private String listMarkerLabel(int index, RichTextBlock.Kind kind) {
-        return kind == RichTextBlock.Kind.BULLET ? "•" : blockNumber(index, kind) + ".";
-    }
-
-    private int listIndent(int index, RichTextBlock.Kind kind) {
-        if (kind == RichTextBlock.Kind.BULLET) return 24;
-        int finalNumber = blockNumber(index, kind);
-        BlockFrame frame = editor.document().blocks().get(index).frame();
-        for (int i = index + 1; i < editor.document().blocks().size(); i++) {
-            Block next = editor.document().blocks().get(i);
-            if (!(next instanceof RichTextBlock rich) || rich.kind() != kind || !Objects.equals(frame, rich.frame())) break;
-            finalNumber++;
-        }
-        // Every item shares the width needed by the longest number, including 100 and beyond.
-        return Math.max(24, font.width(finalNumber + ".") + 8);
+        return PageLayoutEngine.listMarkerLabel(editor.document(), index, kind);
     }
 
     private ContentControl listMarkerBox(LayoutLine line) {
@@ -2520,134 +2216,8 @@ final class NativeWikiScreen extends Screen {
         return new ContentControl(Math.round(textX) - 14, line.y() + Math.max(0, (line.height() - 10) / 2), 10, 10);
     }
 
-    private static int advancePastWrappingImages(int y, List<TextFlowExclusion> flowExclusions) {
-        boolean advanced;
-        do {
-            advanced = false;
-            for (TextFlowExclusion exclusion : flowExclusions) {
-                if (y >= exclusion.topY() && y < exclusion.bottomY()) {
-                    y = exclusion.bottomY();
-                    advanced = true;
-                }
-            }
-        } while (advanced);
-        return y;
-    }
-
-    private int appendTable(List<TableLayout> result, int y, int blockIndex, TableBlock table, int bodyWidth,
-            List<TextFlowExclusion> exclusions) {
-        int xOffset = frameInset(table.frame());
-        if (table.frame() != null) bodyWidth -= xOffset + 12;
-        int tableWidth = Math.max(24, bodyWidth);
-        int columns = table.columnCount();
-        int baseColumnWidth = Math.max(1, tableWidth / columns);
-        List<TableRowLayout> rows = new ArrayList<>(table.rows().size());
-        int tableHeight = 0;
-        for (TableRow row : table.rows()) {
-            List<TableCellLayout> cells = new ArrayList<>(columns);
-            int rowHeight = TABLE_ROW_HEIGHT;
-            for (int column = 0; column < columns; column++) {
-                int cellWidth = column == columns - 1
-                        ? tableWidth - column * baseColumnWidth : baseColumnWidth;
-                TableCellLayout cell = layoutTableCell(row.cells().get(column),
-                        Math.max(1, cellWidth - TABLE_CELL_PADDING * 2));
-                cells.add(cell);
-                rowHeight = Math.max(rowHeight, cell.contentHeight() + TABLE_CELL_PADDING * 2);
-            }
-            rows.add(new TableRowLayout(tableHeight, rowHeight, List.copyOf(cells)));
-            tableHeight += rowHeight;
-        }
-        if (table.frame() != null) {
-            boolean advanced;
-            do {
-                advanced = false;
-                for (TextFlowExclusion e : exclusions) if (y < e.bottomY() && y + tableHeight > e.topY()) {
-                    y = e.bottomY(); advanced = true;
-                }
-            } while (advanced);
-        }
-        result.add(new TableLayout(blockIndex, y, xOffset, tableWidth, baseColumnWidth, columns, tableHeight,
-                List.copyOf(rows), table));
-        return y + tableHeight + 8;
-    }
-
     /** Lays out every cell with the same glyph measurements used by regular text. */
-    private TableCellLayout layoutTableCell(TableCell cell, int availableWidth) {
-        TextFlowLayout.Result layout = flowText(cell.runs(), availableWidth, 0, 1f, 0, 1, List.of());
-        return new TableCellLayout(layout.lines().stream().map(line -> new TableCellLine(
-                line.y(), line.height(), line.start(), line.end(), fragments(line))).toList(), layout.bottom());
-    }
 
-    private ImageAppend appendImage(List<ImageLayout> result, int y, int blockIndex, ImageBlock image, int bodyWidth) {
-        return appendImage(result, y, blockIndex, image, bodyWidth, 0, 0);
-    }
-
-    private ImageAppend appendImage(List<ImageLayout> result, int y, int blockIndex, ImageBlock image, int bodyWidth,
-            int originX, int originY) {
-        WikiImageTextures.LoadedImage loaded = WikiImageTextures.get(image.assetHash()).orElse(null);
-        if (loaded == null) {
-            int width = Math.min(120, bodyWidth);
-            boolean inline = image.layoutMode() == ImageLayoutMode.INLINE;
-            int xOffset = inline ? 0 : clamp(toGuiCoordinate(image.offsetX()), 0, Math.max(0, bodyWidth - width));
-            xOffset += originX;
-            int imageY = inline ? y : originY + Math.max(0, toGuiCoordinate(image.offsetY()));
-            result.add(new ImageLayout(blockIndex, imageY, xOffset, width, 32, image.alignment(), image.layoutMode(), null));
-            return inline
-                    ? new ImageAppend(y + 40, null)
-                    : new ImageAppend(y, null);
-        }
-        // ImageBlock stores physical display pixels, not Minecraft GUI units.
-        // Without this conversion a 300px source at GUI scale 4 is painted
-        // as 1200px, causing the "large but blurry" result. Text and image
-        // layout are intentionally independent: a picture begins at its own
-        // pixel size and is only reduced when it would exceed this column.
-        int physicalWidth = image.requestedWidth() == 0 ? loaded.width() : image.requestedWidth();
-        int maximumWidth = switch (image.layoutMode()) {
-            case WRAP_LEFT, WRAP_RIGHT -> Math.max(32, bodyWidth - 30);
-            default -> bodyWidth;
-        };
-        int width = clamp(toGuiPixels(physicalWidth), 1, maximumWidth);
-        int height = Math.max(1, Math.round((float) loaded.height() * width / loaded.width()));
-        int xOffset = switch (image.alignment()) {
-            case LEFT -> 0;
-            case CENTER -> Math.max(0, (bodyWidth - width) / 2);
-            case RIGHT -> Math.max(0, bodyWidth - width);
-        };
-        int imageY = y;
-        if (image.layoutMode() != ImageLayoutMode.INLINE) {
-            // Non-inline images use fixed coordinates on the authored page.
-            // They therefore remain where the author placed them when text or
-            // a new paragraph is inserted earlier in the document.
-            xOffset = clamp(toGuiCoordinate(image.offsetX()), 0, Math.max(0, bodyWidth - width));
-            imageY = originY + Math.max(0, toGuiCoordinate(image.offsetY()));
-        }
-        xOffset += originX;
-        if (imageResize != null && imageResize.blockIndex() == blockIndex) {
-            width = Math.min(maximumWidth, imageResize.previewWidth());
-            height = Math.max(1, Math.round((float) loaded.height() * width / loaded.width()));
-            if (image.layoutMode() != ImageLayoutMode.INLINE) {
-                xOffset = clamp(imageResize.previewX(), originX, originX + Math.max(0, bodyWidth - width));
-                imageY = Math.max(originY, imageResize.previewY());
-            } else {
-                xOffset = originX + switch (image.alignment()) {
-                    case LEFT -> 0;
-                    case CENTER -> Math.max(0, (bodyWidth - width) / 2);
-                    case RIGHT -> Math.max(0, bodyWidth - width);
-                };
-            }
-        }
-        if (imageMove != null && imageMove.blockIndex() == blockIndex) {
-            xOffset = clamp(imageMove.startImageX() + imageMove.deltaX(), originX, originX + Math.max(0, bodyWidth - width));
-            imageY = Math.max(originY, imageMove.startImageY() + imageMove.deltaY());
-        }
-        result.add(new ImageLayout(blockIndex, imageY, xOffset, width, height, image.alignment(), image.layoutMode(), loaded));
-        return switch (image.layoutMode()) {
-            case WRAP_LEFT, WRAP_RIGHT -> new ImageAppend(y,
-                    new TextFlowExclusion(Math.max(0, imageY - 4), imageY + height + 4, Math.max(0, xOffset - 4), xOffset + width + 4));
-            case COVER, FLOATING -> new ImageAppend(y, null);
-            case INLINE -> new ImageAppend(y + height + 8, null);
-        };
-    }
 
     private void drawFragments(GuiGraphics graphics, LayoutLine line, int bodyX, int y) {
         int cursorX = bodyX + line.indent();
@@ -2695,8 +2265,8 @@ final class NativeWikiScreen extends Screen {
     }
 
     private int annotationForFragment(LayoutLine line, Fragment fragment) {
-        for (int index = 0; index < annotations.size(); index++) {
-            LocalTextAnnotation annotation = annotations.get(index);
+        for (int index = 0; index < annotationWorkspace.entries().size(); index++) {
+            LocalTextAnnotation annotation = annotationWorkspace.entries().get(index);
             if (line.blockIndex() < annotation.startBlock() || line.blockIndex() > annotation.endBlock()) {
                 continue;
             }
@@ -2711,35 +2281,10 @@ final class NativeWikiScreen extends Screen {
         return -1;
     }
 
-    private static Component styled(String text, TextStyle style) {
-        return Component.literal(text).withStyle(Style.EMPTY
-                .withBold(style.bold())
-                .withItalic(style.italic())
-                .withStrikethrough(style.strikethrough())
-                .withUnderlined(style.underline())
-                .withColor(style.rgbColor()));
-    }
-
     private int measuredFragmentWidth(Fragment fragment) {
         // Round the boundaries, never each advance: cumulative rounding caused
         // visible drift between small/large text, selection and caret placement.
         return Math.max(0, Math.round(fragment.x() + fragment.advance()) - Math.round(fragment.x()));
-    }
-
-    private static float headingScale(int level) {
-        return switch (level) {
-            case 1 -> 1.52f;
-            case 2 -> 1.28f;
-            default -> 1.12f;
-        };
-    }
-
-    private static int headingIndent(int level) {
-        return switch (level) {
-            case 1 -> 0;
-            case 2 -> 4;
-            default -> 8;
-        };
     }
 
     private void drawTableContextMenu(GuiGraphics graphics, Bounds bounds, int mouseX, int mouseY) {
@@ -3058,174 +2603,118 @@ final class NativeWikiScreen extends Screen {
         return (int) Math.round(guiPixels * scale);
     }
 
-    private record ToolButton(int action, String label, int x, int y, int width) { }
-    private static final String[] RIBBON_TABS = { "开始", "段落", "插入", "文档" };
-    private static final int[][] RIBBON_ACTIONS = {
-        {0, 1, 11, 2, 12, 13, 4, 5, 3, 14, 15, 31, 32},
-        {16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 33},
-        {6, 7, 28, 29, 30}, {8, 34, 35, 9, 36}
-    };
-    private static final String[] TOOL_LABELS = { "B", "I", "S", "样式", "字号", "A", "图片", "表格", "保存", "删页", "排序",
-        "U", "x²", "x₂", "隐藏", "</>", "", "", "", "", "", "", "引用", "任务", "提示", "警告", "步骤", "代码块",
-        "链接", "指令", "分隔线", "撤销", "重做", "正文", "导入 Word", "导出 Word", "纸色" };
-    private static final String[] TOOL_HINTS = { "粗体  Ctrl+B", "斜体  Ctrl+I", "删除线  Ctrl+Shift+X", "正文 / 标题", "字号  Ctrl+Shift+P", "文字颜色",
-        "插入图片（也可 Ctrl+V 粘贴）", "插入表格", "保存  Ctrl+S", "删除当前页", "排序选中段落", "下划线  Ctrl+U",
-        "上标", "下标", "隐藏文字  Ctrl+Shift+H（阅读时点击揭示）", "行内代码", "左对齐  Ctrl+L", "居中  Ctrl+E", "右对齐  Ctrl+R", "两端对齐  Ctrl+J",
-        "无序列表", "有序列表", "引用块", "任务列表（编辑时点击方框勾选）", "信息提示框", "警告提示框", "编号步骤", "多行代码块",
-        "超链接  Ctrl+K", "点击执行 MC 指令", "插入水平分隔线", "撤销  Ctrl+Z", "重做  Ctrl+Y", "清除段落样式", "导入 .docx 文档（可撤销）", "导出 .docx 文档", "纸张背景颜色（本地偏好，不上传）" };
-    private static int toolWidth(int action) { return switch (action) {
-        case 0,1,2,5,11,12,13,15,16,17,18,19,20,21 -> 23;
-        case 34,35 -> 66;
-        case 6,7 -> 50;
-        default -> 38;
-    }; }
-    // Reserve the largest tab so changing tabs never moves the document under the caret.
-    private static int toolbarRows(int width) {
-        int maximum = 1;
-        for (int[] actions : RIBBON_ACTIONS) {
-            int rows = 1, used = 0;
-            for (int action : actions) {
-                int w = toolWidth(action);
-                if (used > 0 && used + w > width) { rows++; used = 0; }
-                used += w + 3;
-            }
-            maximum = Math.max(maximum, rows);
-        }
-        return maximum;
+    private List<EditorRibbon.Button> toolbarButtons(Bounds bounds) {
+        return ribbon.buttons(bounds.modeX(), bounds.toolbarY(), bounds.right() - 8);
     }
-    private List<ToolButton> toolbarButtons(Bounds bounds) {
-        List<ToolButton> result = new ArrayList<>();
-        int x = bounds.modeX(), y = bounds.toolbarY() + 18;
-        for (int action : RIBBON_ACTIONS[ribbonTab]) {
-            int w = toolWidth(action);
-            if (x > bounds.modeX() && x + w > bounds.right() - 8) { x = bounds.modeX(); y += 20; }
-            result.add(new ToolButton(action, TOOL_LABELS[action], x, y, w));
-            x += w + 3;
-        }
-        return result;
+
+    private boolean handleRibbonTabClick(Bounds bounds, double mouseX, double mouseY) {
+        if (!ribbon.selectTabAt(bounds.modeX(), bounds.toolbarY(), mouseX, mouseY)) return false;
+        closeToolbarMenu();
+        return true;
     }
-    private boolean handleRibbonTabClick(Bounds b, double mx, double my) {
-        for (int i = 0; i < RIBBON_TABS.length; i++) {
-            if (inRect(mx, my, b.modeX() + i * 45, b.toolbarY(), 42, 16)) {
-                ribbonTab = i; closeToolbarMenu(); return true;
-            }
-        }
-        return false;
+
+    private void drawRibbon(GuiGraphics graphics, Bounds bounds, int mouseX, int mouseY) {
+        ribbon.draw(graphics, font, RIBBON_COLORS, bounds.modeX(), bounds.toolbarY(), bounds.right() - 8,
+                mouseX, mouseY, this::toolActive, currentTypingStyle().rgbColor());
     }
-    private void drawRibbon(GuiGraphics g, Bounds b, int mx, int my) {
-        for (int i = 0; i < RIBBON_TABS.length; i++) {
-            int x = b.modeX() + i * 45, y = b.toolbarY();
-            if (i == ribbonTab) g.fill(x, y + 14, x + 40, y + 16, BookEditorChrome.ACCENT);
-            g.drawString(font, RIBBON_TABS[i], x + 8, y + 3, i == ribbonTab ? HEADING_COLOR : DISABLED_COLOR, false);
-        }
-        for (ToolButton button : toolbarButtons(b)) {
-            int x = button.x(), y = button.y(), a = button.action();
-            boolean hover = inRect(mx, my, x, y, button.width(), 18), active = toolActive(a);
-            g.fill(x, y, x + button.width(), y + 18, active ? 0xFFCDD9C1 : hover ? 0xFFE7DCBF : 0xFFF3EBD7);
-            if (active) { g.fill(x, y + 17, x + button.width(), y + 18, BookEditorChrome.ACCENT); }
-            if (a == 6 || a == 7) {
-                int ix=x+4, iy=y+4, ink=0xFF315D89;
-                g.fill(ix,iy,ix+13,iy+10,ink);g.fill(ix+1,iy+1,ix+12,iy+9,0xFFF2F6FA);
-                if(a==7) {g.fill(ix+4,iy,ix+5,iy+10,ink);g.fill(ix+8,iy,ix+9,iy+10,ink);g.fill(ix,iy+3,ix+13,iy+4,ink);g.fill(ix,iy+6,ix+13,iy+7,ink);}
-                else {g.fill(ix+8,iy+2,ix+10,iy+4,0xFFE4B347);for(int k=0;k<7;k++)g.fill(ix+2+k,iy+7-Math.min(k,6-k),ix+3+k,iy+9,ink);}
-                g.drawString(font,button.label(),x+21,y+5,BODY_TEXT_COLOR,false);
-            } else if (a >= 16 && a <= 21) {
-                for (int row = 0; row < 4; row++) {
-                    int length = (a == 19 || row % 2 == 0) ? 13 : 8;
-                    int left = x + 5 + (a == 17 ? (13 - length) / 2 : a == 18 ? 13 - length : 0);
-                    if (a >= 20) { left = x + 9; length = row % 2 == 0 ? 10 : 7; }
-                    g.fill(left, y + 4 + row * 3, left + length, y + 5 + row * 3, BODY_TEXT_COLOR);
-                    if (a == 20) g.fill(x + 4, y + 4 + row * 3, x + 6, y + 6 + row * 3, BODY_TEXT_COLOR);
-                }
-                if (a == 21) { g.pose().pushPose(); g.pose().translate(x + 2, y + 3, 0); g.pose().scale(.55f,.55f,1); g.drawString(font,"1",0,0,BODY_TEXT_COLOR,false);g.drawString(font,"2",0,10,BODY_TEXT_COLOR,false);g.pose().popPose(); }
-            } else {
-                Component label = Component.literal(button.label()).withStyle(Style.EMPTY.withBold(a == 0).withItalic(a == 1)
-                        .withStrikethrough(a == 2).withUnderlined(a == 11));
-                g.drawString(font, label, x + (button.width() - font.width(label)) / 2, y + 5, BODY_TEXT_COLOR, false);
-                if (a == 5) g.fill(x + 5, y + 14, x + button.width() - 5, y + 16, 0xFF000000 | currentTypingStyle().rgbColor());
-            }
-        }
-    }
-    private boolean toolActive(int action) {
-        TextStyle s = currentTypingStyle();
-        RichTextBlock r = caretBlock >= 0 && caretBlock < editor.document().blocks().size()
+
+    private boolean toolActive(EditorCommand command) {
+        TextStyle style = currentTypingStyle();
+        RichTextBlock block = caretBlock >= 0 && caretBlock < editor.document().blocks().size()
                 && editor.document().blocks().get(caretBlock) instanceof TextualBlock text ? RichTextBlock.from(text) : null;
-        return switch (action) {
-            case 0 -> s.bold(); case 1 -> s.italic(); case 2 -> s.strikethrough(); case 11 -> s.underline();
-            case 12 -> s.script() == 1; case 13 -> s.script() == -1; case 14 -> s.hidden(); case 15 -> s.code();
-            case 16,17,18,19 -> r != null && r.alignment().ordinal() == action - 16;
-            case 22 -> r != null && r.isQuote();
-            case 23 -> r != null && r.isTask();
-            case 24,25 -> r != null && (r.frame() == null ? r.kind() == kindForAction(action)
-                    : r.frame().kind().name().equals(kindForAction(action).name()));
-            case 20,21,26,27 -> r != null && r.kind() == kindForAction(action);
+        return switch (command) {
+            case BOLD -> style.bold();
+            case ITALIC -> style.italic();
+            case STRIKETHROUGH -> style.strikethrough();
+            case UNDERLINE -> style.underline();
+            case SUPERSCRIPT -> style.script() == 1;
+            case SUBSCRIPT -> style.script() == -1;
+            case HIDDEN -> style.hidden();
+            case INLINE_CODE -> style.code();
+            case ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT, ALIGN_JUSTIFY ->
+                block != null && block.alignment() == command.alignment();
+            case QUOTE -> block != null && block.isQuote();
+            case TASK -> block != null && block.isTask();
+            case INFO, WARNING -> block != null && (block.frame() == null ? block.kind() == command.paragraphKind()
+                    : block.frame().kind().name().equals(command.paragraphKind().name()));
+            case BULLET, NUMBERED, STEP, CODE_BLOCK -> block != null && block.kind() == command.paragraphKind();
             default -> false;
         };
     }
-    private void drawRibbonTooltip(GuiGraphics g, Bounds b, int mx, int my) {
+
+    private void drawRibbonTooltip(GuiGraphics graphics, Bounds bounds, int mouseX, int mouseY) {
         if (!mode.isEditable() || toolbarMenu != ToolbarMenu.NONE) return;
-        for (ToolButton button : toolbarButtons(b)) if (inRect(mx,my,button.x(),button.y(),button.width(),18)) {
-            g.renderTooltip(font, Component.literal(TOOL_HINTS[button.action()]), mx, my); return;
-        }
-    }
-    private static RichTextBlock.Kind kindForAction(int a) {
-        return switch (a) {
-            case 20 -> RichTextBlock.Kind.BULLET; case 21 -> RichTextBlock.Kind.NUMBERED;
-            case 22 -> RichTextBlock.Kind.QUOTE; case 23 -> RichTextBlock.Kind.TASK;
-            case 24 -> RichTextBlock.Kind.INFO; case 25 -> RichTextBlock.Kind.WARNING;
-            case 26 -> RichTextBlock.Kind.STEP; case 27 -> RichTextBlock.Kind.CODE;
-            default -> RichTextBlock.Kind.NORMAL;
-        };
+        ribbon.drawTooltip(graphics, font, bounds.modeX(), bounds.toolbarY(), bounds.right() - 8, mouseX, mouseY);
     }
 
     private boolean handleToolbarClick(Bounds bounds, double mouseX, double mouseY) {
-        for (ToolButton button : toolbarButtons(bounds)) {
-            if (!inRect(mouseX, mouseY, button.x(), button.y(), button.width(), 18)) continue;
-            return switch (button.action()) {
-                case 0 -> toggleBold();
-                case 1 -> toggleItalic();
-                case 2 -> toggleStrikethrough();
-                case 3 -> openHeadingMenu();
-                case 4 -> openFontSizeMenu();
-                case 5 -> openColorMenu();
-                case 6 -> importAndInsertImage();
-                case 7 -> openTableMenu();
-                case 8 -> {
-                    editor.finishTextEdit();
-                    saveCurrentDocument();
-                    yield true;
-                }
-                case 9 -> {
-                    if (!editor.deletePage(pageIndex)) status("至少保留一页，无法删除");
-                    else {
-                        pageIndex = clampPage(pageIndex);
-                        clearSelection();
-                        refreshAfterEdit();
-                        pageChanged.accept(pageIndex);
-                        status("已删除当前页面");
-                    }
-                    yield true;
-                }
-                case 10 -> openSortMenu();
-                case 11 -> { boolean value = !currentTypingStyle().underline(); yield applyTextFormat(s -> s.withUnderline(value)); }
-                case 12, 13 -> { int value = button.action() == 12 ? 1 : -1; int next = currentTypingStyle().script() == value ? 0 : value;
-                    yield applyTextFormat(s -> s.withScript(next)); }
-                case 14 -> { boolean value = !currentTypingStyle().hidden(); yield applyTextFormat(s -> s.withHidden(value)); }
-                case 15 -> { boolean value = !currentTypingStyle().code(); yield applyTextFormat(s -> s.withCode(value)); }
-                case 16,17,18,19 -> formatParagraph(r -> new RichTextBlock(r.kind(), RichTextBlock.Alignment.values()[button.action()-16], r.headingLevel(), r.checked(), r.runs(), r.frame()));
-                case 20,21,22,23,24,25,26,27,33 -> applyParagraphKind(kindForAction(button.action()), !toolActive(button.action()));
-                case 28 -> openLinkMenu(false);
-                case 29 -> openLinkMenu(true);
-                case 30 -> insertRule();
-                case 31 -> { if (editor.undo()) refreshAfterEdit(); yield true; }
-                case 32 -> { if (editor.redo()) refreshAfterEdit(); yield true; }
-                case 34 -> importDocx();
-                case 35 -> exportDocx();
-                case 36 -> openPaperColorMenu();
-                default -> false;
-            };
+        for (EditorRibbon.Button button : toolbarButtons(bounds)) {
+            if (button.contains(mouseX, mouseY)) return performCommand(button.command(), false);
         }
         return false;
+    }
+
+    /** Shared execution for the toolbar and focused-body/table keyboard shortcuts. */
+    private boolean performCommand(EditorCommand command, boolean shortcut) {
+        if (!mode.isEditable()) return false;
+        return switch (command) {
+            case BOLD -> toggleBold();
+            case ITALIC -> toggleItalic();
+            case STRIKETHROUGH -> toggleStrikethrough();
+            case HEADING -> openHeadingMenu();
+            case FONT_SIZE -> openFontSizeMenu();
+            case TEXT_COLOR -> openColorMenu();
+            case IMAGE -> importAndInsertImage();
+            case TABLE -> openTableMenu();
+            case SAVE -> {
+                editor.finishTextEdit();
+                saveCurrentDocument();
+                yield true;
+            }
+            case DELETE_PAGE -> {
+                if (!editor.deletePage(pageIndex)) status("至少保留一页，无法删除");
+                else {
+                    pageIndex = clampPage(pageIndex);
+                    clearSelection();
+                    refreshAfterEdit();
+                    pageChanged.accept(pageIndex);
+                    status("已删除当前页面");
+                }
+                yield true;
+            }
+            case SORT -> openSortMenu();
+            case UNDERLINE -> {
+                boolean value = !currentTypingStyle().underline();
+                yield applyTextFormat(style -> style.withUnderline(value));
+            }
+            case SUPERSCRIPT, SUBSCRIPT -> {
+                int value = command == EditorCommand.SUPERSCRIPT ? 1 : -1;
+                int next = currentTypingStyle().script() == value ? 0 : value;
+                yield applyTextFormat(style -> style.withScript(next));
+            }
+            case HIDDEN -> {
+                boolean value = !currentTypingStyle().hidden();
+                yield applyTextFormat(style -> style.withHidden(value));
+            }
+            case INLINE_CODE -> {
+                boolean value = !currentTypingStyle().code();
+                yield applyTextFormat(style -> style.withCode(value));
+            }
+            case ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT, ALIGN_JUSTIFY ->
+                formatParagraph(block -> new RichTextBlock(block.kind(), command.alignment(),
+                        block.headingLevel(), block.checked(), block.runs(), block.frame()));
+            case BULLET, NUMBERED, QUOTE, TASK, INFO, WARNING, STEP, CODE_BLOCK, NORMAL ->
+                // Word's Ctrl+Shift+L applies bullets; the button also allows toggling them off.
+                applyParagraphKind(command.paragraphKind(), shortcut && command == EditorCommand.BULLET || !toolActive(command));
+            case LINK -> openLinkMenu(false);
+            case COMMAND_LINK -> openLinkMenu(true);
+            case RULE -> insertRule();
+            case UNDO -> { if (editor.undo()) refreshAfterEdit(); yield true; }
+            case REDO -> { if (editor.redo()) refreshAfterEdit(); yield true; }
+            case IMPORT_DOCX -> importDocx();
+            case EXPORT_DOCX -> exportDocx();
+            case PAPER_COLOR -> openPaperColorMenu();
+        };
     }
 
     private boolean applyParagraphKind(RichTextBlock.Kind kind, boolean enabled) {
@@ -3690,30 +3179,6 @@ final class NativeWikiScreen extends Screen {
             if (keyCode == GLFW.GLFW_KEY_A) {
                 return selectCurrentPageText();
             }
-            if (keyCode == GLFW.GLFW_KEY_B) {
-                return toggleBold();
-            }
-            if (keyCode == GLFW.GLFW_KEY_L || keyCode == GLFW.GLFW_KEY_E || keyCode == GLFW.GLFW_KEY_R || keyCode == GLFW.GLFW_KEY_J) {
-                if (keyCode == GLFW.GLFW_KEY_L && shift) return applyParagraphKind(RichTextBlock.Kind.BULLET, true);
-                RichTextBlock.Alignment alignment = switch(keyCode) {
-                    case GLFW.GLFW_KEY_E -> RichTextBlock.Alignment.CENTER; case GLFW.GLFW_KEY_R -> RichTextBlock.Alignment.RIGHT;
-                    case GLFW.GLFW_KEY_J -> RichTextBlock.Alignment.JUSTIFY; default -> RichTextBlock.Alignment.LEFT;
-                };
-                return formatParagraph(r -> new RichTextBlock(r.kind(),alignment,r.headingLevel(),r.checked(),r.runs(),r.frame()));
-            }
-            if (keyCode == GLFW.GLFW_KEY_H && shift) { boolean value=!currentTypingStyle().hidden();return applyTextFormat(s -> s.withHidden(value)); }
-            if (keyCode == GLFW.GLFW_KEY_EQUAL) { int value=shift?1:-1;int next=currentTypingStyle().script()==value?0:value;return applyTextFormat(s -> s.withScript(next)); }
-            if (keyCode == GLFW.GLFW_KEY_K) return openLinkMenu(false);
-            if (keyCode == GLFW.GLFW_KEY_U) { boolean value = !currentTypingStyle().underline(); return applyTextFormat(s -> s.withUnderline(value)); }
-            if (keyCode == GLFW.GLFW_KEY_I) {
-                return toggleItalic();
-            }
-            if (keyCode == GLFW.GLFW_KEY_P && shift) {
-                return openFontSizeMenu();
-            }
-            if (keyCode == GLFW.GLFW_KEY_X && shift) {
-                return toggleStrikethrough();
-            }
             if (keyCode == GLFW.GLFW_KEY_C) {
                 return copySelection();
             }
@@ -3722,23 +3187,6 @@ final class NativeWikiScreen extends Screen {
             }
             if (keyCode == GLFW.GLFW_KEY_V) {
                 return pasteClipboard();
-            }
-            if (keyCode == GLFW.GLFW_KEY_S) {
-                editor.finishTextEdit();
-                saveCurrentDocument();
-                return true;
-            }
-            if (keyCode == GLFW.GLFW_KEY_Z && !shift) {
-                if (editor.undo()) {
-                    refreshAfterEdit();
-                }
-                return true;
-            }
-            if (keyCode == GLFW.GLFW_KEY_Y || (keyCode == GLFW.GLFW_KEY_Z && shift)) {
-                if (editor.redo()) {
-                    refreshAfterEdit();
-                }
-                return true;
             }
             return false;
         }
@@ -4842,24 +4290,13 @@ final class NativeWikiScreen extends Screen {
         tableCellCaret = null;
     }
 
-    private String annotationStorageKey() {
-        String namespace = session.personalAnnotationKey();
-        if (annotationKeyDocument != editor.document() || !namespace.equals(annotationKeyNamespace)) {
-            annotationKeyDocument = editor.document();
-            annotationKeyNamespace = namespace;
-            cachedAnnotationKey = LocalAnnotationStore.versionKey(namespace,
-                    new WikiDocumentCodec().contentHash(annotationKeyDocument));
-        }
-        return cachedAnnotationKey;
-    }
-
     private void saveCurrentDocument() {
         if (saveInProgress) { status("正在保存，请稍候…"); return; }
         finishTitleEditing();
-        closeCommentComposer();
+        if (!closeCommentComposer()) return;
         editor.finishTextEdit();
         try {
-            annotationStore.saveTextAnnotations(annotationStorageKey(), annotations);
+            annotationWorkspace.saveVersion(session.personalAnnotationKey());
         } catch (IOException exception) {
             status("本地批注保存失败，正文尚未提交");
             closeAfterSave = false;
@@ -4896,18 +4333,9 @@ final class NativeWikiScreen extends Screen {
     }
 
     private void rebaseAnnotations() {
-        WikiDocument next = editor.document();
-        if (annotationDocument == next) return;
-        List<LocalTextAnnotation> rebased = sortAnnotations(annotationHistory.rebase(
-                annotationDocument, next, annotations, editor.retainedDocuments()));
-        annotationDocument = next;
-        if (!rebased.equals(annotations)) {
-            annotations = rebased;
-            selectedAnnotationIndex = -1;
-            // These are draft anchors. Do not overwrite the original book's
-            // comments until this content version is explicitly saved.
-
-        }
+        List<LocalTextAnnotation> previous = annotationWorkspace.entries();
+        annotationWorkspace.rebase(editor.document(), editor.retainedDocuments());
+        if (!previous.equals(annotationWorkspace.entries())) selectedAnnotationIndex = -1;
     }
 
     private void refreshAfterEdit() {
@@ -5067,7 +4495,7 @@ final class NativeWikiScreen extends Screen {
         int desiredDirectoryWidth = directoryVisible
                 ? clamp(directoryModuleWidth, MODULE_MIN_WIDTH, MODULE_MAX_WIDTH) : 0;
         int bodyPaperWidth = BODY_COLUMN_WIDTH;
-        boolean wantsAnnotationPaper = annotationVisible && (commentComposerOpen || !annotations.isEmpty());
+        boolean wantsAnnotationPaper = annotationVisible && (annotationWorkspace.editing() || !annotationWorkspace.entries().isEmpty());
         int desiredAnnotationWidth = wantsAnnotationPaper
                 ? clamp(annotationModuleWidth, MODULE_MIN_WIDTH, MODULE_MAX_WIDTH) : 0;
         // A smaller game viewport may temporarily fold a sidebar, but never
@@ -5142,7 +4570,7 @@ final class NativeWikiScreen extends Screen {
         if (!mode.isEditable()) {
             return lockConfirmationOpen ? EDITOR_HEADER_HEIGHT : READER_HEADER_HEIGHT;
         }
-        int toolbarBottom = 43 + toolbarRows(Math.max(1, Math.min(width - 12, UI_CANVAS_WIDTH) - 16)) * 20;
+        int toolbarBottom = 43 + EditorRibbon.rows(Math.max(1, Math.min(width - 12, UI_CANVAS_WIDTH) - 16)) * 20;
         return (toolbarMenu == ToolbarMenu.NONE || isColorMenu()) && !lockConfirmationOpen
                 ? toolbarBottom + 4 : toolbarBottom + (isLinkMenu() ? 44 : 28);
     }
@@ -5179,69 +4607,6 @@ final class NativeWikiScreen extends Screen {
         if (minecraft != null && minecraft.player != null) {
             minecraft.player.displayClientMessage(Component.literal(message), true);
         }
-    }
-
-    private record Fragment(String text, TextStyle style, float scale, boolean link, int startColumn, int endColumn,
-            float x, float advance, Component painted) {
-    }
-
-    private record LayoutLine(int blockIndex, int startColumn, int endColumn, int y, int height, int indent,
-            boolean quote, List<Fragment> fragments) {
-    }
-
-    /** One independently sized, non-text document object on the current page. */
-    private record ImageLayout(int blockIndex, int y, int xOffset, int width, int height, ImageAlignment alignment,
-            ImageLayoutMode layoutMode, WikiImageTextures.LoadedImage loaded) {
-    }
-
-    private record ImageAppend(int nextY, TextFlowExclusion flowExclusion) {
-    }
-
-    /** A positioned wrapping image removes one middle span from later text lines. */
-    private record TextFlowExclusion(int topY, int bottomY, int gapStart, int gapEnd) {
-    }
-
-
-    /**
-     * Per-page table layout.  Rows and cells retain their visual lines so input
-     * hit-testing uses exactly the same wrapped geometry as drawing.
-     */
-    private record TableLayout(int blockIndex, int y, int xOffset, int width, int baseColumnWidth, int columns,
-            int totalHeight, List<TableRowLayout> rowLayouts, TableBlock table) {
-        int columnWidth(int column) {
-            return column == columns - 1 ? width - column * baseColumnWidth : baseColumnWidth;
-        }
-
-        int rowAt(int localY) {
-            for (int row = 0; row < rowLayouts.size(); row++) {
-                TableRowLayout layout = rowLayouts.get(row);
-                if (localY < layout.yOffset() + layout.height()) {
-                    return row;
-                }
-            }
-            return Math.max(0, rowLayouts.size() - 1);
-        }
-    }
-
-    private record TableRowLayout(int yOffset, int height, List<TableCellLayout> cells) {
-    }
-
-    private record TableCellLayout(List<TableCellLine> lines, int contentHeight) {
-        TableCellLine lineAt(int localY) {
-            if (lines.isEmpty()) {
-                return new TableCellLine(0, 0, 0, 0, List.of());
-            }
-            for (TableCellLine line : lines) {
-                if (localY < line.yOffset() + line.height()) {
-                    return line;
-                }
-            }
-            return lines.get(lines.size() - 1);
-        }
-    }
-
-    private record TableCellLine(int yOffset, int height, int startColumn, int endColumn,
-            List<Fragment> fragments) {
     }
 
     private record TableCellHit(int blockIndex, int row, int column, int caretColumn) {
@@ -5298,9 +4663,6 @@ final class NativeWikiScreen extends Screen {
     private record ImageContextMenu(int blockIndex, int x, int y) {
     }
 
-    private record PendingAnnotation(int startBlock, int startColumn, int endBlock, int endColumn,
-            String quotedText) {
-    }
 
     private record AnnotationDisplayLine(int annotationIndex, boolean quoted, String text, int visualIndex) {
     }
@@ -5309,7 +4671,7 @@ final class NativeWikiScreen extends Screen {
     }
 
     /** A saved review card or the one draft card currently being edited. */
-    private record AnnotationCardSource(int annotationIndex, PendingAnnotation anchor, String comment,
+    private record AnnotationCardSource(int annotationIndex, Anchor anchor, String comment,
             boolean composer) {
     }
 
@@ -5402,7 +4764,7 @@ final class NativeWikiScreen extends Screen {
         }
 
         int menuY() {
-            return toolbarY() + 18 + toolbarRows(Math.max(1, right - left - 16)) * 20 + 2;
+            return toolbarY() + 18 + EditorRibbon.rows(Math.max(1, right - left - 16)) * 20 + 2;
         }
 
         int lockConfirmationX() {

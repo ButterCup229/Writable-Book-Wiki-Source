@@ -1,0 +1,68 @@
+PASS
+loaded production classes from JAR: union:/<workspace>/.tools/release-validation/server/mods/Writable%20Book%20Wiki-0.1.4-NeoForge-1.21.1.jar%23121!/
+running dedicated server with real world and registries
+fresh isolated test world, no prior fixture overwritten
+editable book item registered on dedicated server
+book and quill surrounded by eight paper crafts one Wiki book
+CREATIVE inventory starts without a partial pointer
+CREATIVE inventory first use creates readable unlocked book
+CREATIVE inventory may edit its unlocked book
+CREATIVE crafted starts without a partial pointer
+CREATIVE crafted first use creates readable unlocked book
+CREATIVE crafted may edit its unlocked book
+SURVIVAL inventory starts without a partial pointer
+SURVIVAL inventory first use creates readable unlocked book
+SURVIVAL inventory may edit its unlocked book
+SURVIVAL crafted starts without a partial pointer
+SURVIVAL crafted first use creates readable unlocked book
+SURVIVAL crafted may edit its unlocked book
+world image receiver accepts ordered bytes
+changed content forks only held physical copy
+other physical copy retains original pointer
+fork does not rewrite original content file
+Unicode images tables and authored pages persist together
+title save updates held item display name
+unchanged save does not fork or change hash
+survival cannot lock a book
+creative lock changes only lock flag
+survival save of locked book is rejected
+denied locked save leaves file unchanged
+survival unlock is rejected
+creative force edit forks and preserves lock
+creative unlock preserves ID and hash
+changing held item mid-upload does not rewrite stored book
+rejected hand-swap save creates no orphan revision
+large body actually spans multiple transport chunks
+partial upload commits neither pointer nor document
+late chunks after disconnect cannot resurrect discarded upload
+complete multi-chunk upload persists exact large body
+book repository and index remain world-scoped across dimensions
+image stored in world-owned assets
+real vanilla block interaction accepts Wiki book tag
+lectern mixin recognises Wiki book and vanilla displayed-book state is true
+survival placement consumes exactly one book
+placement preserves book ID hash and lock
+two-page Wiki book begins at comparator signal one
+two independent players open vanilla lectern menus
+vanilla menus stay valid with Wiki book
+both readers receive the same source with no edit or lock authority
+lectern document chunks reconstruct complete rich body
+lectern delivery includes world image bytes
+vanilla shared page and comparator follow one reader turning to page two
+other reader turns back and vanilla redstone page pulse fires
+wrong menu ID cannot request a lectern body
+distant reader is rejected
+changed book identity rejects stale open
+adventure reader cannot take book
+survival reader can take book with vanilla button
+taking book invalidates every reader and clears lectern
+taken book retains pointer in player inventory
+removed book cannot be opened by stale request
+SURVIVAL fresh unopened book initialises on placement
+SURVIVAL placement retains vanilla consumption rule
+SURVIVAL breaking lectern drops Wiki book
+CREATIVE fresh unopened book initialises on placement
+CREATIVE placement retains vanilla consumption rule
+CREATIVE breaking lectern drops Wiki book
+vanilla book-and-quill placement remains unchanged
+shared second page staged for restart

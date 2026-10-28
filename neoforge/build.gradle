@@ -67,9 +67,36 @@ if (providers.gradleProperty('editorSmoke').isPresent()) {
     neoForge.runs.client {
         gameDirectory = layout.projectDirectory.dir('run-editor-smoke')
         systemProperty 'writablebookwiki.editorSmoke', 'true'
+        if (providers.gradleProperty('protocolBaselineJar').isPresent()) {
+            systemProperty 'writablebookwiki.protocolBaselineJar', providers.gradleProperty('protocolBaselineJar').get()
+        }
         programArguments.addAll('--width', '1600', '--height', '1000')
     }
     tasks.named('runClient').configure { dependsOn tasks.named('editorSmokeClasses') }
+}
+
+if (providers.gradleProperty('lecternSmoke').isPresent()) {
+    if (!providers.gradleProperty('editorSmoke').isPresent()) throw new GradleException('lecternSmoke requires editorSmoke sources')
+    neoForge.runs.client {
+        gameDirectory = layout.projectDirectory.dir('run-lectern-smoke')
+        systemProperty 'writablebookwiki.editorSmoke', 'false'
+        systemProperty 'writablebookwiki.lecternSmoke', 'true'
+        programArguments.addAll('--quickPlayMultiplayer', '127.0.0.1:25594')
+    }
+}
+
+// Separate test mod for a real installed dedicated server. Never merged into the player JAR.
+sourceSets {
+    serverSmoke {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += output + compileClasspath
+    }
+}
+tasks.register('serverSmokeJar', Jar) {
+    dependsOn tasks.named('serverSmokeClasses')
+    archiveFileName = 'writablebookwiki-server-verification.jar'
+    destinationDirectory = layout.buildDirectory.dir('test-harness')
+    from sourceSets.serverSmoke.output
 }
 
 tasks.named('jar', Jar).configure {

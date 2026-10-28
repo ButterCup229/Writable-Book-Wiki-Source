@@ -1,0 +1,154 @@
+import java.util.zip.ZipFile
+import java.security.MessageDigest
+import org.gradle.api.artifacts.ProjectDependency
+
+def allowedProjects = [core: [], 'plugin-api': ['core'], local: ['core', 'plugin-api'], neoforge: ['core', 'plugin-api', 'local']]
+def forbiddenReferences = [
+    core: [~/\b(?:net\.minecraft|net\.neoforged|org\.lwjgl|com\.writablebookwiki\.(?:local|api|neoforge)|java\.nio\.file)\b/],
+    'plugin-api': [~/\b(?:net\.minecraft|net\.neoforged|org\.lwjgl|com\.writablebookwiki\.(?:local|neoforge))\b/],
+    local: [~/\b(?:net\.minecraft|net\.neoforged|org\.lwjgl|com\.writablebookwiki\.neoforge)\b/]
+]
+// Reviewed exceptions keep existing coordinators from growing while they are decomposed.
+def lineCeilings = ['NativeWikiScreen.java': 4900, 'WikiDocumentEditor.java': 1400, 'BookNetwork.java': 1080]
+tasks.register('verifyArchitecture') {
+    group = 'verification'
+    description = 'Check module direction, feature boundaries, package paths and source growth.'
+    doLast {
+        def errors = []
+        allowedProjects.each { module, allowed ->
+            def target = project(':' + module)
+            ['api', 'implementation', 'compileOnly', 'runtimeOnly'].each { configuration ->
+                target.configurations.findByName(configuration)?.dependencies?.withType(ProjectDependency)?.each { dependency ->
+                    if (!allowed.contains(dependency.path.tokenize(':').last()))
+                        errors << module + ': forbidden project dependency ' + dependency.path
+                }
+            }
+            target.fileTree('src/main/java').matching { include '**/*.java' }.each { file ->
+                def source = file.getText('UTF-8')
+                def code = source.replaceAll(/(?s)\/\*.*?\*\//, '').replaceAll(/(?m)\/\/[^\r\n]*/, '')
+                (forbiddenReferences[module] ?: []).each { rule ->
+                    if (code =~ rule) errors << file.name + ': forbidden cross-layer reference'
+                }
+                def pkg = source =~ /(?m)^package ([a-zA-Z0-9_.]+);/
+                if (!pkg.find() || !file.path.replace('\\', '/').endsWith(pkg.group(1).replace('.', '/') + '/' + file.name))
+                    errors << file.name + ': package and source path disagree'
+                def ceiling = lineCeilings[file.name] ?: 800
+                if (source.readLines().size() > ceiling) errors << file.name + ': exceeds reviewed line ceiling ' + ceiling
+                if (file.name in ['BookProtocol.java', 'BookPayloads.java', 'LecternOpenRequest.java'] &&
+                        code =~ /\b(?:BookNetwork|WorldBookRepository|ClientBookSessions|NativeWikiScreen|DocumentSession|java\.nio\.file|net\.minecraft\.client)\b/)
+                    errors << file.name + ': protocol depends on workflow/UI/files'
+                if (file.name in ['EditorCommand.java', 'EditorRibbon.java'] &&
+                        code =~ /\b(?:NativeWikiScreen|DocumentSession|BookNetwork|WikiDocumentEditor|LocalAnnotationStore|java\.nio\.file)\b/)
+                    errors << file.name + ': command/ribbon depends on workflow or persistence'
+                if (file.name == 'AnnotationWorkspace.java' &&
+                        code =~ /\b(?:DocumentSession|BookNetwork|LocalDocumentStore|FileDocumentCache|java\.nio\.file)\b/)
+                    errors << file.name + ': private annotation state depends on shared-document storage'
+                if (file.name == 'PageLayoutEngine.java' &&
+                        code =~ /\b(?:NativeWikiScreen|DocumentSession|BookNetwork|PacketDistributor|Files)\b/)
+                    errors << file.name + ': measurement depends on events/persistence'
+                if (file.name in ['BookNetwork.java', 'WorldBookRepository.java', 'WorldBookIndexData.java',
+                        'WritableBookWikiMod.java', 'WritableBookWikiItems.java', 'WritableBookWikiServerGameEvents.java',
+                        'LecternBookSupport.java', 'LecternBlockEntityMixin.java'] &&
+                        code =~ /\bnet\.minecraft\.client\b/)
+                    errors << file.name + ': common/server code imports a client-only type'
+            }
+        }
+        if (!errors.isEmpty()) throw new GradleException(errors.join('\n'))
+        logger.lifecycle('ARCHITECTURE_PASS: module direction, feature boundaries, package paths, source ceilings')
+    }
+}
+tasks.register('verifyReleaseJar') {
+    group = 'verification'
+    description = 'Check player JAR identity, merged modules and exclusion of test artifacts.'
+    dependsOn ':neoforge:jar'
+    doLast {
+        File artifact = project(':neoforge').tasks.named('jar').get().archiveFile.get().asFile
+        if (artifact.name != mod_name + '-' + mod_version + '-NeoForge-' + minecraft_version + '.jar')
+            throw new GradleException('Wrong release filename: ' + artifact.name)
+        new ZipFile(artifact).withCloseable { zip ->
+            def entries = zip.entries().toList().collect { it.name }
+            ['META-INF/neoforge.mods.toml',
+             'com/writablebookwiki/core/document/WikiDocument.class',
+             'com/writablebookwiki/local/storage/AtomicFiles.class',
+             'com/writablebookwiki/local/annotation/AnnotationWorkspace.class',
+             'com/writablebookwiki/neoforge/client/editor/EditorCommand.class',
+             'com/writablebookwiki/neoforge/client/editor/EditorRibbon.class',
+             'com/writablebookwiki/api/PluginApiModuleMarker.class',
+             'com/writablebookwiki/neoforge/WritableBookWikiMod.class',
+             'writablebookwiki.mixins.json',
+             'com/writablebookwiki/neoforge/mixin/LecternBlockEntityMixin.class',
+             'data/minecraft/tags/item/lectern_books.json',
+             'assets/writablebookwiki/lang/zh_cn.json'].each { required ->
+                if (!entries.contains(required)) throw new GradleException('Missing release entry: ' + required)
+            }
+            def forbidden = entries.findAll { it =~ /(?i)(?:EditorSmoke|LecternClientSmoke|SmokeChecks|ServerReleaseSmoke|verification\\/|protocol-v1|independent\.docx|release-0\.1\.1\.ewd|ldlib|\.java$|\.part$)/ || it.endsWith('Test.class') || it.endsWith('Tests.class') || (it.endsWith('.class') && it.contains('Test$')) }
+            if (!forbidden.isEmpty()) throw new GradleException('Development/foreign payloads in release: ' + forbidden)
+            if (entries.any { it.endsWith('.class') && !it.startsWith('com/writablebookwiki/') })
+                throw new GradleException('Unexpected bundled classes')
+            String metadata = zip.getInputStream(zip.getEntry('META-INF/neoforge.mods.toml')).withCloseable {
+                new String(it.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
+            }
+            ['modId="' + mod_id + '"', 'version="' + mod_version + '"', 'displayName="' + mod_name + '"'].each {
+                if (!metadata.contains(it)) throw new GradleException('Metadata missing ' + it)
+            }
+            if (metadata.contains('$' + '{') || metadata.toLowerCase().contains('ldlib'))
+                throw new GradleException('Unexpanded or obsolete dependency metadata')
+        }
+        def hash = MessageDigest.getInstance('SHA-256').digest(artifact.bytes).encodeHex().toString()
+        def report = layout.buildDirectory.file('reports/release-verification.txt').get().asFile
+        report.parentFile.mkdirs()
+        report.setText('RELEASE_JAR_PASS\n' + artifact.name + '\nbytes=' + artifact.length() + '\nsha256=' + hash + '\n', 'UTF-8')
+        logger.lifecycle('RELEASE_JAR_PASS: ' + artifact.name + ', SHA-256 ' + hash)
+    }
+}
+tasks.named('check') {
+    dependsOn 'verifyArchitecture', 'verifyReleaseJar', ':core:test', ':local:test'
+}
+tasks.register('verifyAll') {
+    group = 'verification'
+    description = 'Run non-GUI regression, architecture and distributable checks.'
+    dependsOn 'check', ':neoforge:build'
+}
+tasks.register('verifyClientSmoke') {
+    group = 'verification'
+    description = 'Start the real client and require a fresh PASS marker; use -PeditorSmoke.'
+    if (providers.gradleProperty('editorSmoke').isPresent()) dependsOn ':neoforge:runClient'
+    doLast {
+        if (providers.gradleProperty('lecternSmoke').isPresent()) throw new GradleException('Use verifyLecternSmoke for lectern tests')
+        if (!providers.gradleProperty('editorSmoke').isPresent())
+            throw new GradleException('Use verifyClientSmoke -PeditorSmoke (starts and closes Minecraft).')
+        def result = project(':neoforge').file('run-editor-smoke/editor-smoke-results/result.txt')
+        if (!result.isFile() || result.readLines('UTF-8').isEmpty() || result.readLines('UTF-8')[0] != 'PASS')
+            throw new GradleException('Client smoke did not pass; inspect ' + result)
+        logger.lifecycle('CLIENT_SMOKE_PASS: ' + (result.readLines('UTF-8').size() - 1) + ' checks')
+    }
+}
+tasks.register('verifyLecternSmoke') {
+    group = 'verification'
+    description = 'Verify a real TCP client against the opt-in localhost lectern fixture server.'
+    if (providers.gradleProperty('lecternSmoke').isPresent()) dependsOn ':neoforge:runClient'
+    doLast {
+        if (!providers.gradleProperty('lecternSmoke').isPresent() || !providers.gradleProperty('editorSmoke').isPresent())
+            throw new GradleException('Use verifyLecternSmoke -PeditorSmoke -PlecternSmoke with the fixture server running')
+        def result = project(':neoforge').file('run-lectern-smoke/lectern-smoke-results/result.txt')
+        if (!result.isFile() || result.readLines('UTF-8').isEmpty() || result.readLines('UTF-8')[0] != 'PASS')
+            throw new GradleException('Lectern TCP check failed; inspect ' + result)
+        logger.lifecycle('LECTERN_TCP_SMOKE_PASS: ' + (result.readLines('UTF-8').size() - 1) + ' checks')
+    }
+}
+
+gradle.projectsEvaluated {
+    project(':neoforge').tasks.named('check') {
+        dependsOn rootProject.tasks.named('verifyArchitecture'), rootProject.tasks.named('verifyReleaseJar'), ':core:test', ':local:test'
+    }
+    if (providers.gradleProperty('editorSmoke').isPresent()) {
+        project(':neoforge').tasks.named('runClient') {
+            doFirst {
+                // Generated test marker only; never a player document.
+                def resultPath = providers.gradleProperty('lecternSmoke').isPresent()
+                        ? 'run-lectern-smoke/lectern-smoke-results/result.txt' : 'run-editor-smoke/editor-smoke-results/result.txt'
+                java.nio.file.Files.deleteIfExists(project(':neoforge').file(resultPath).toPath())
+            }
+        }
+    }
+}

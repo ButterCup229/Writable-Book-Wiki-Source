@@ -1,6 +1,15 @@
 package com.writablebookwiki.neoforge;
 
+import com.writablebookwiki.neoforge.network.BookProtocol;
+import com.writablebookwiki.neoforge.network.LecternOpenRequest;
+import net.minecraft.world.inventory.LecternMenu;
+import com.writablebookwiki.neoforge.network.PacedBookDelivery;
+import static com.writablebookwiki.neoforge.network.BookProtocol.*;
+import com.writablebookwiki.neoforge.network.BookPayloads.*;
+import com.writablebookwiki.local.transfer.DocumentTransferBuffer;
+
 import com.writablebookwiki.core.book.BookPointer;
+import com.writablebookwiki.core.book.SaveOutcome;
 import com.writablebookwiki.core.book.BookRevision;
 import com.writablebookwiki.core.book.BookRevisionPolicy;
 import com.writablebookwiki.core.book.BookSaveResult;
@@ -11,14 +20,11 @@ import com.writablebookwiki.core.document.ImageBlock;
 import com.writablebookwiki.local.ChunkedAssetReceiver;
 import com.writablebookwiki.local.FileDocumentCache;
 import com.writablebookwiki.local.ImportedImageAsset;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Arrays;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayDeque;
-import java.util.Arrays;
-import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -31,8 +37,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.chat.Component;
-import net.minecraft.network.RegistryFriendlyByteBuf;
-import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
@@ -58,27 +62,11 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
  */
 @EventBusSubscriber(modid = WritableBookWikiMod.MOD_ID, bus = EventBusSubscriber.Bus.MOD)
 public final class BookNetwork {
-    /** Raw document bytes per packet. Packet framing is additional. */
-    public static final int DOCUMENT_CHUNK_BYTES = 24 * 1024;
-    /** Image chunks use the same bounded packet size as document chunks. */
-    public static final int IMAGE_CHUNK_BYTES = DOCUMENT_CHUNK_BYTES;
-
-    /**
-     * A technical in-memory ceiling, not a gameplay quota. It prevents an
-     * invalid header from allocating arbitrary memory before the configured
-     * synchronisation policy is available. Images are external assets and do
-     * not count toward this document-data transfer.
-     */
-    public static final int MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
-    /** Technical in-memory cap while this first asset transport is buffered. 25 MiB images fit comfortably. */
-    public static final int MAX_IMAGE_BYTES = 64 * 1024 * 1024;
-    /** A missing chunk must not reserve a document/image buffer forever. */
-    private static final long TRANSFER_TIMEOUT_NANOS = 45_000_000_000L;
-    private static final int MAX_DOCUMENT_CHUNKS =
-            (MAX_DOCUMENT_BYTES + DOCUMENT_CHUNK_BYTES - 1) / DOCUMENT_CHUNK_BYTES;
-    private static final int MAX_IMAGE_CHUNKS =
-            (MAX_IMAGE_BYTES + IMAGE_CHUNK_BYTES - 1) / IMAGE_CHUNK_BYTES;
-    private static final int MAX_FAILURE_MESSAGE_CHARS = 160;
+    // Public aliases retained for callers; protocol bounds live with the wire contract.
+    public static final int DOCUMENT_CHUNK_BYTES = BookProtocol.DOCUMENT_CHUNK_BYTES;
+    public static final int IMAGE_CHUNK_BYTES = BookProtocol.IMAGE_CHUNK_BYTES;
+    public static final int MAX_DOCUMENT_BYTES = BookProtocol.MAX_DOCUMENT_BYTES;
+    public static final int MAX_IMAGE_BYTES = BookProtocol.MAX_IMAGE_BYTES;
     private static final ResourceLocation EDITABLE_BOOK_ITEM =
             ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "editable_book");
     private static final WikiDocumentCodec DOCUMENT_CODEC = new WikiDocumentCodec();
@@ -87,7 +75,7 @@ public final class BookNetwork {
     private static final Map<UUID, PendingSaveDocument> PENDING_SERVER_SAVES = new HashMap<>();
     private static final Map<UUID, PendingImageAsset> PENDING_SERVER_ASSETS = new HashMap<>();
     /* Server-main-thread delivery queues, paced separately for each recipient. */
-    private static final Map<UUID, PendingServerDelivery> PENDING_SERVER_DELIVERIES = new HashMap<>();
+    private static final Map<UUID, PacedBookDelivery> PENDING_SERVER_DELIVERIES = new HashMap<>();
 
     /* Accessed only from client main-thread payload work after initialisation. */
     private static long latestRequestId;
@@ -98,9 +86,37 @@ public final class BookNetwork {
     private BookNetwork() {
     }
 
+    /** Client main thread: invalidate open replies and release partial image files. */
+    static void disconnectClient() {
+        latestRequestId = 0;
+        pendingDocument = null;
+        PENDING_CLIENT_ASSETS.values().forEach(PendingImageAsset::discard);
+        PENDING_CLIENT_ASSETS.clear();
+    }
+
+    /** Server main thread: logout cannot leave streams or uploads attached to this UUID. */
+    static void disconnectPlayer(UUID playerId) {
+        PENDING_SERVER_SAVES.remove(playerId);
+        PendingImageAsset asset = PENDING_SERVER_ASSETS.remove(playerId);
+        if (asset != null) asset.discard();
+        PacedBookDelivery delivery = PENDING_SERVER_DELIVERIES.remove(playerId);
+        if (delivery != null) delivery.close();
+    }
+
+    /** Server main thread: also covers integrated servers reopened in the same process. */
+    static void stopServer() {
+        PENDING_SERVER_SAVES.clear();
+        PENDING_SERVER_ASSETS.values().forEach(PendingImageAsset::discard);
+        PENDING_SERVER_ASSETS.clear();
+        PENDING_SERVER_DELIVERIES.values().forEach(PacedBookDelivery::close);
+        PENDING_SERVER_DELIVERIES.clear();
+    }
+
     @SubscribeEvent
     public static void registerPayloadHandlers(RegisterPayloadHandlersEvent event) {
         var registrar = event.registrar("1");
+        registrar.playToServer(LecternOpenRequest.TYPE, LecternOpenRequest.STREAM_CODEC,
+                BookNetwork::handleLecternOpen);
         registrar.playToServer(BookOpenRequestPayload.TYPE, BookOpenRequestPayload.STREAM_CODEC,
                 BookNetwork::handleOpenRequest);
         registrar.playToClient(BookOpenHeaderPayload.TYPE, BookOpenHeaderPayload.STREAM_CODEC,
@@ -326,17 +342,18 @@ public final class BookNetwork {
      * A zero configuration value retains the previous immediate behaviour.
      */
     static void deliverQueuedTransfers(MinecraftServer server) {
-        Iterator<Map.Entry<UUID, PendingServerDelivery>> deliveries = PENDING_SERVER_DELIVERIES.entrySet().iterator();
+        Iterator<Map.Entry<UUID, PacedBookDelivery>> deliveries = PENDING_SERVER_DELIVERIES.entrySet().iterator();
         while (deliveries.hasNext()) {
-            Map.Entry<UUID, PendingServerDelivery> entry = deliveries.next();
-            PendingServerDelivery delivery = entry.getValue();
+            Map.Entry<UUID, PacedBookDelivery> entry = deliveries.next();
+            PacedBookDelivery delivery = entry.getValue();
             ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
             if (player == null) {
                 delivery.close();
                 deliveries.remove();
                 continue;
             }
-            delivery.deliver(player, WritableBookWikiServerConfig.downloadBytesPerSecond());
+            delivery.deliver(payload -> PacketDistributor.sendToPlayer(player, payload),
+                    WritableBookWikiServerConfig.downloadBytesPerSecond());
             if (delivery.isComplete()) {
                 delivery.close();
                 deliveries.remove();
@@ -351,85 +368,100 @@ public final class BookNetwork {
     private static void handleOpenRequest(BookOpenRequestPayload request,
             net.neoforged.neoforge.network.handling.IPayloadContext context) {
         context.enqueueWork(() -> {
-            if (!(context.player() instanceof ServerPlayer player)) {
-                return;
-            }
-            if (!isRequestIdValid(request.requestId())) {
-                return;
-            }
+            if (!(context.player() instanceof ServerPlayer player) || !isRequestIdValid(request.requestId())) return;
             ItemStack stack = player.getItemInHand(request.hand());
             if (!isEditableBook(stack)) {
                 sendFailure(player, request.requestId(), "请手持Writable Book Wiki 后再打开。");
                 return;
             }
-
-            WorldBookRepository repository = WorldBookRepository.forLevel(player.serverLevel());
-            BookRevision revision;
             try {
-                Optional<BookPointer> pointer = BookStackData.read(stack);
-                if (pointer.isPresent()) {
-                    Optional<BookRevision> loaded = repository.load(pointer.get());
-                    if (loaded.isEmpty()) {
-                        // Never silently replace an existing pointer: that
-                        // would make a damaged world document look like a new
-                        // blank book and lose the only recovery reference.
-                        sendFailure(player, request.requestId(), "这本书的世界存档内容不存在或已损坏。");
-                        return;
-                    }
-                    revision = loaded.get();
-                    // A verified legacy document can be migrated by the
-                    // repository without changing visible content. Persist
-                    // its replacement pointer on precisely this held copy;
-                    // other physical copies remain untouched until opened.
-                    if (!revision.pointer().equals(pointer.get())) {
-                        BookStackData.write(stack, revision.pointer());
-                    }
-                } else {
-                    revision = repository.create(player);
-                    BookStackData.write(stack, revision.pointer());
-                }
-            } catch (IOException exception) {
-                sendFailure(player, request.requestId(), "无法读取或创建这本书的世界存档内容。");
-                return;
-            }
-
-            if (!revision.pointer().contentHash().equals(DOCUMENT_CODEC.contentHash(revision.document()))) {
-                sendFailure(player, request.requestId(), "这本书的内容校验失败，未发送。");
-                return;
-            }
-            boolean bodyOmitted = revision.pointer().equals(request.cachedPointer());
-            byte[] bytes = null;
-            int chunkCount = 0;
-            if (!bodyOmitted) {
-                try {
-                    bytes = DOCUMENT_CODEC.encode(revision.document());
-                } catch (IllegalArgumentException exception) {
-                    sendFailure(player, request.requestId(), "这本书的内容格式无效，无法打开。");
-                    return;
-                }
-                if (bytes.length <= 0 || bytes.length > MAX_DOCUMENT_BYTES) {
-                    sendFailure(player, request.requestId(), "这本书的文本内容超过当前安全传输大小。");
-                    return;
-                }
-                if (!WritableBookWikiServerConfig.allowsDistribution(bytes.length)) {
-                    sendFailure(player, request.requestId(), "这本书的正文超过服务器设置的单次分发大小。");
-                    return;
-                }
-                chunkCount = chunkCountFor(bytes.length);
-            }
-            replaceServerDelivery(player.getUUID());
-            boolean canEdit = !revision.pointer().locked() || player.isCreative();
-            PacketDistributor.sendToPlayer(player, new BookOpenHeaderPayload(request.requestId(), request.hand(),
-                    revision.pointer(), canEdit, player.isCreative(), bodyOmitted,
-                    bodyOmitted ? 0 : bytes.length, chunkCount));
-            if (!bodyOmitted) {
-                serverDelivery(player.getUUID()).enqueue(new DocumentDelivery(request.requestId(), bytes));
-            }
-            for (String assetHash : imageAssetHashes(revision.document())) {
-                repository.assetPathIfPresent(assetHash).ifPresent(asset ->
-                        enqueueImageForClient(player, request.requestId(), assetHash, asset));
+                BookRevision revision = loadOrCreateBook(player, stack);
+                deliverBook(player, request.requestId(), request.hand(), revision, request.cachedPointer(),
+                        !revision.pointer().locked() || player.isCreative(), player.isCreative());
+            } catch (IOException | IllegalArgumentException exception) {
+                sendFailure(player, request.requestId(), "这本书的世界存档内容不存在、已损坏或无法读取。");
             }
         });
+    }
+
+    /** Shared verified read/initialisation for held books and placement on a lectern. */
+    static BookRevision loadOrCreateBook(ServerPlayer player, ItemStack stack) throws IOException {
+        WorldBookRepository repository = WorldBookRepository.forLevel(player.serverLevel());
+        Optional<BookPointer> pointer = BookStackData.read(stack);
+        BookRevision revision = pointer.isPresent()
+                ? repository.load(pointer.get()).orElseThrow(() -> new IOException("Missing or damaged book"))
+                : repository.create(player);
+        if (pointer.isEmpty() || !revision.pointer().equals(pointer.get())) BookStackData.write(stack, revision.pointer());
+        return revision;
+    }
+
+    public static long requestLecternOpen(int containerId, BookPointer pointer) {
+        long requestId = nextRequestId();
+        latestRequestId = requestId;
+        pendingDocument = null;
+        PacketDistributor.sendToServer(new LecternOpenRequest(requestId, containerId, pointer));
+        return requestId;
+    }
+
+    private static void handleLecternOpen(LecternOpenRequest request,
+            net.neoforged.neoforge.network.handling.IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (!(context.player() instanceof ServerPlayer player)) return;
+            if (!(player.containerMenu instanceof LecternMenu menu) || menu.containerId != request.containerId()
+                    || !menu.stillValid(player) || !isEditableBook(menu.getBook())
+                    || !BookStackData.read(menu.getBook()).filter(request.pointer()::equals).isPresent()) {
+                sendFailure(player, request.requestId(), "讲台已关闭、距离过远或书已被取走。");
+                return;
+            }
+            try {
+                BookRevision revision = loadOrCreateBook(player, menu.getBook());
+                // The hand field belongs to the existing delivery envelope only.
+                // This source always creates a read-only client session, never a held-book edit session.
+                deliverBook(player, request.requestId(), InteractionHand.MAIN_HAND, revision, null, false, false);
+            } catch (IOException | IllegalArgumentException exception) {
+                sendFailure(player, request.requestId(), "讲台中的书籍内容无法读取。");
+            }
+        });
+    }
+
+    private static void deliverBook(ServerPlayer player, long requestId, InteractionHand hand,
+            BookRevision revision, BookPointer cachedPointer, boolean canEdit, boolean canChangeLock) {
+        WorldBookRepository repository = WorldBookRepository.forLevel(player.serverLevel());
+        if (!revision.pointer().contentHash().equals(DOCUMENT_CODEC.contentHash(revision.document()))) {
+            sendFailure(player, requestId, "这本书的内容校验失败，未发送。");
+            return;
+        }
+        boolean bodyOmitted = revision.pointer().equals(cachedPointer);
+        byte[] bytes = null;
+        int chunkCount = 0;
+        if (!bodyOmitted) {
+            try {
+                bytes = DOCUMENT_CODEC.encode(revision.document());
+            } catch (IllegalArgumentException exception) {
+                sendFailure(player, requestId, "这本书的内容格式无效，无法打开。");
+                return;
+            }
+            if (bytes.length <= 0 || bytes.length > MAX_DOCUMENT_BYTES) {
+                sendFailure(player, requestId, "这本书的文本内容超过当前安全传输大小。");
+                return;
+            }
+            if (!WritableBookWikiServerConfig.allowsDistribution(bytes.length)) {
+                sendFailure(player, requestId, "这本书的正文超过服务器设置的单次分发大小。");
+                return;
+            }
+            chunkCount = chunkCountFor(bytes.length);
+        }
+        replaceServerDelivery(player.getUUID());
+        PacketDistributor.sendToPlayer(player, new BookOpenHeaderPayload(requestId, hand,
+                revision.pointer(), canEdit, canChangeLock, bodyOmitted,
+                bodyOmitted ? 0 : bytes.length, chunkCount));
+        if (!bodyOmitted) {
+            serverDelivery(player.getUUID()).enqueueDocument(requestId, bytes);
+        }
+        for (String assetHash : imageAssetHashes(revision.document())) {
+            repository.assetPathIfPresent(assetHash).ifPresent(asset ->
+                    enqueueImageForClient(player, requestId, assetHash, asset));
+        }
     }
 
     private static void handleSaveHeader(BookSaveHeaderPayload header,
@@ -699,7 +731,7 @@ public final class BookNetwork {
                 return;
             }
             int size = Math.toIntExact(sizeLong);
-            serverDelivery(player.getUUID()).enqueue(new ImageDelivery(requestId, assetHash, asset, size));
+            serverDelivery(player.getUUID()).enqueueImage(requestId, assetHash, asset, size);
         } catch (IOException ignored) {
             // A missing/corrupt optional picture never prevents its text document opening.
         }
@@ -878,66 +910,29 @@ public final class BookNetwork {
         clientReceiver.onBookOpenFailed(requestId, reason);
     }
 
-    private static boolean isRequestIdValid(long requestId) {
-        return requestId > 0;
-    }
 
-    private static int chunkCountFor(int byteLength) {
-        if (byteLength <= 0 || byteLength > MAX_DOCUMENT_BYTES) {
-            throw new IllegalArgumentException("Document byte length is outside transport bounds");
-        }
-        return (int) (((long) byteLength + DOCUMENT_CHUNK_BYTES - 1L) / DOCUMENT_CHUNK_BYTES);
-    }
 
-    private static int imageChunkCountFor(int byteLength) {
-        if (byteLength <= 0 || byteLength > MAX_IMAGE_BYTES) {
-            throw new IllegalArgumentException("Image byte length is outside transport bounds");
-        }
-        return (int) (((long) byteLength + IMAGE_CHUNK_BYTES - 1L) / IMAGE_CHUNK_BYTES);
-    }
 
     private static String assetTransferKey(long requestId, String assetHash) {
         return requestId + ":" + assetHash;
     }
 
     private static void replaceServerDelivery(UUID playerId) {
-        PendingServerDelivery prior = PENDING_SERVER_DELIVERIES.remove(playerId);
+        PacedBookDelivery prior = PENDING_SERVER_DELIVERIES.remove(playerId);
         if (prior != null) {
             prior.close();
         }
-        PENDING_SERVER_DELIVERIES.put(playerId, new PendingServerDelivery());
+        PENDING_SERVER_DELIVERIES.put(playerId, new PacedBookDelivery());
     }
 
-    private static PendingServerDelivery serverDelivery(UUID playerId) {
-        return PENDING_SERVER_DELIVERIES.computeIfAbsent(playerId, ignored -> new PendingServerDelivery());
+    private static PacedBookDelivery serverDelivery(UUID playerId) {
+        return PENDING_SERVER_DELIVERIES.computeIfAbsent(playerId, ignored -> new PacedBookDelivery());
     }
 
-    private static boolean isAssetHashValid(String assetHash) {
-        return assetHash != null && assetHash.matches("[0-9a-f]{64}");
-    }
 
-    private static InteractionHand readHand(RegistryFriendlyByteBuf buffer) {
-        int handOrdinal = buffer.readUnsignedByte();
-        InteractionHand[] hands = InteractionHand.values();
-        if (handOrdinal >= hands.length) {
-            throw new IllegalArgumentException("Invalid interaction hand");
-        }
-        return hands[handOrdinal];
-    }
 
-    private static void writeHand(RegistryFriendlyByteBuf buffer, InteractionHand hand) {
-        buffer.writeByte(hand.ordinal());
-    }
 
-    private static BookPointer readPointer(RegistryFriendlyByteBuf buffer) {
-        return new BookPointer(buffer.readUUID(), buffer.readUtf(64), buffer.readBoolean());
-    }
 
-    private static void writePointer(RegistryFriendlyByteBuf buffer, BookPointer pointer) {
-        buffer.writeUUID(pointer.bookId());
-        buffer.writeUtf(pointer.contentHash(), 64);
-        buffer.writeBoolean(pointer.locked());
-    }
 
     /** Complete, verified data exposed to a client UI/session adapter. */
     public record ReceivedBook(long requestId, InteractionHand hand, BookPointer pointer, boolean canEdit,
@@ -946,12 +941,6 @@ public final class BookNetwork {
 
     /** Server-authoritative result exposed to the client session adapter. */
     public record SavedBook(long requestId, InteractionHand hand, BookPointer pointer, SaveOutcome outcome) {
-    }
-
-    public enum SaveOutcome {
-        UNCHANGED,
-        LOCK_STATE_CHANGED,
-        FORKED
     }
 
     /**
@@ -988,298 +977,39 @@ public final class BookNetwork {
      * intact: the packet codec can verify their exact position and length,
      * while the bucket determines when the next chunk is sent.
      */
-    private static final class PendingServerDelivery {
-        private final Deque<OutboundDelivery> queue = new ArrayDeque<>();
-        private double availableBytes;
-
-        private void enqueue(OutboundDelivery delivery) {
-            queue.addLast(delivery);
-        }
-
-        private void deliver(ServerPlayer player, int bytesPerSecond) {
-            boolean unlimited = bytesPerSecond == 0;
-            if (!unlimited) {
-                // Do not accumulate an arbitrary idle burst: one second is
-                // enough to keep normal transfers smooth after a short lag.
-                availableBytes = Math.min(bytesPerSecond, availableBytes + bytesPerSecond / 20.0D);
-            }
-            while (!queue.isEmpty()) {
-                OutboundDelivery current = queue.peekFirst();
-                int nextBytes = current.nextChunkBytes();
-                if (nextBytes < 0) {
-                    current.close();
-                    queue.removeFirst();
-                    continue;
-                }
-                if (nextBytes == 0) {
-                    // Image headers are emitted only when that image reaches
-                    // the front of the queue. This prevents client receive
-                    // timeouts while an earlier body is intentionally paced.
-                    current.sendNext(player);
-                    if (current.isComplete()) {
-                        current.close();
-                        queue.removeFirst();
-                    }
-                    continue;
-                }
-                if (!unlimited && availableBytes < nextBytes) {
-                    return;
-                }
-                int sent = current.sendNext(player);
-                if (sent <= 0) {
-                    current.close();
-                    queue.removeFirst();
-                    continue;
-                }
-                if (!unlimited) {
-                    availableBytes -= sent;
-                }
-                if (current.isComplete()) {
-                    current.close();
-                    queue.removeFirst();
-                }
-            }
-        }
-
-        private boolean isComplete() {
-            return queue.isEmpty();
-        }
-
-        private void close() {
-            while (!queue.isEmpty()) {
-                queue.removeFirst().close();
-            }
-        }
-    }
-
-    private interface OutboundDelivery {
-        /** Returns zero while a header remains to send, or -1 when unavailable. */
-        int nextChunkBytes();
-
-        /** Sends one header or one body chunk, returning body bytes sent. */
-        int sendNext(ServerPlayer player);
-
-        boolean isComplete();
-
-        void close();
-    }
-
-    /** Queued document body; its corresponding header has already been sent. */
-    private static final class DocumentDelivery implements OutboundDelivery {
-        private final long requestId;
-        private final byte[] bytes;
-        private int nextChunkIndex;
-
-        private DocumentDelivery(long requestId, byte[] bytes) {
-            this.requestId = requestId;
-            this.bytes = bytes;
-        }
-
-        @Override
-        public int nextChunkBytes() {
-            if (isComplete()) {
-                return -1;
-            }
-            int offset = nextChunkIndex * DOCUMENT_CHUNK_BYTES;
-            return Math.min(DOCUMENT_CHUNK_BYTES, bytes.length - offset);
-        }
-
-        @Override
-        public int sendNext(ServerPlayer player) {
-            int expected = nextChunkBytes();
-            if (expected <= 0) {
-                return 0;
-            }
-            int offset = nextChunkIndex * DOCUMENT_CHUNK_BYTES;
-            PacketDistributor.sendToPlayer(player, new BookOpenChunkPayload(requestId, nextChunkIndex,
-                    Arrays.copyOfRange(bytes, offset, offset + expected)));
-            nextChunkIndex++;
-            return expected;
-        }
-
-        @Override
-        public boolean isComplete() {
-            return nextChunkIndex >= chunkCountFor(bytes.length);
-        }
-
-        @Override
-        public void close() {
-            // The document body is an owned byte array; dropping this queue
-            // entry is sufficient for it to be reclaimed.
-        }
-    }
-
-    /** Queued image body. It keeps a small reusable packet buffer, not the full asset in memory. */
-    private static final class ImageDelivery implements OutboundDelivery {
-        private final long requestId;
-        private final String assetHash;
-        private final Path source;
-        private final int totalBytes;
-        private final int chunkCount;
-        private final byte[] buffer = new byte[IMAGE_CHUNK_BYTES];
-        private int nextChunkIndex;
-        private boolean headerSent;
-        private boolean failed;
-        private InputStream input;
-
-        private ImageDelivery(long requestId, String assetHash, Path source, int totalBytes) {
-            this.requestId = requestId;
-            this.assetHash = assetHash;
-            this.source = source;
-            this.totalBytes = totalBytes;
-            this.chunkCount = imageChunkCountFor(totalBytes);
-        }
-
-        @Override
-        public int nextChunkBytes() {
-            if (failed || isComplete()) {
-                return -1;
-            }
-            if (!headerSent) {
-                return 0;
-            }
-            int offset = nextChunkIndex * IMAGE_CHUNK_BYTES;
-            return Math.min(IMAGE_CHUNK_BYTES, totalBytes - offset);
-        }
-
-        @Override
-        public int sendNext(ServerPlayer player) {
-            if (!headerSent) {
-                PacketDistributor.sendToPlayer(player, new ImageOpenHeaderPayload(requestId, assetHash, totalBytes,
-                        chunkCount));
-                headerSent = true;
-                return 0;
-            }
-            int expected = nextChunkBytes();
-            if (expected <= 0) {
-                return 0;
-            }
-            try {
-                if (input == null) {
-                    input = Files.newInputStream(source);
-                }
-                int offset = 0;
-                while (offset < expected) {
-                    int read = input.read(buffer, offset, expected - offset);
-                    if (read < 0) {
-                        failed = true;
-                        return 0;
-                    }
-                    offset += read;
-                }
-                PacketDistributor.sendToPlayer(player, new ImageOpenChunkPayload(requestId, assetHash, nextChunkIndex,
-                        Arrays.copyOf(buffer, expected)));
-                nextChunkIndex++;
-                return expected;
-            } catch (IOException exception) {
-                failed = true;
-                return 0;
-            }
-        }
-
-        @Override
-        public boolean isComplete() {
-            return failed || nextChunkIndex >= chunkCount;
-        }
-
-        @Override
-        public void close() {
-            if (input == null) {
-                return;
-            }
-            try {
-                input.close();
-            } catch (IOException ignored) {
-                // Closing an optional image stream must not affect the book.
-            }
-            input = null;
-        }
-    }
-
     private static final class PendingDocument {
         private final BookOpenHeaderPayload header;
-        private final ByteArrayOutputStream bytes;
-        private int nextChunkIndex;
-        private long lastActivityNanos = System.nanoTime();
+        private final DocumentTransferBuffer buffer;
 
         private PendingDocument(BookOpenHeaderPayload header) {
             this.header = header;
-            this.bytes = new ByteArrayOutputStream(header.totalBytes());
+            this.buffer = new DocumentTransferBuffer(header.totalBytes(), header.chunkCount(),
+                    DOCUMENT_CHUNK_BYTES, MAX_DOCUMENT_BYTES, TRANSFER_TIMEOUT_NANOS, System::nanoTime);
         }
 
-        private BookOpenHeaderPayload header() {
-            return header;
-        }
-
-        private boolean accept(BookOpenChunkPayload chunk) {
-            if (chunk.chunkIndex() != nextChunkIndex || nextChunkIndex >= header.chunkCount()) {
-                return false;
-            }
-            int remaining = header.totalBytes() - bytes.size();
-            int expectedLength = Math.min(DOCUMENT_CHUNK_BYTES, remaining);
-            if (chunk.bytes().length != expectedLength) {
-                return false;
-            }
-            bytes.writeBytes(chunk.bytes());
-            nextChunkIndex++;
-            lastActivityNanos = System.nanoTime();
-            return true;
-        }
-
-        private boolean isComplete() {
-            return nextChunkIndex == header.chunkCount() && bytes.size() == header.totalBytes();
-        }
-
-        private byte[] bytes() {
-            return bytes.toByteArray();
-        }
-
-        private boolean isExpired(long nowNanos) {
-            return nowNanos - lastActivityNanos > TRANSFER_TIMEOUT_NANOS;
-        }
+        private BookOpenHeaderPayload header() { return header; }
+        private boolean accept(BookOpenChunkPayload chunk) { return buffer.accept(chunk.chunkIndex(), chunk.bytes()); }
+        private boolean isComplete() { return buffer.isComplete(); }
+        private byte[] bytes() { return buffer.bytes(); }
+        private boolean isExpired(long nowNanos) { return buffer.isExpired(nowNanos); }
     }
 
     /** Server-side ordered upload buffer. It grows only as validated chunks arrive. */
     private static final class PendingSaveDocument {
         private final BookSaveHeaderPayload header;
-        private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        private int nextChunkIndex;
-        private long lastActivityNanos = System.nanoTime();
+        private final DocumentTransferBuffer buffer;
 
         private PendingSaveDocument(BookSaveHeaderPayload header) {
             this.header = header;
+            this.buffer = new DocumentTransferBuffer(header.totalBytes(), header.chunkCount(),
+                    DOCUMENT_CHUNK_BYTES, MAX_DOCUMENT_BYTES, TRANSFER_TIMEOUT_NANOS, System::nanoTime);
         }
 
-        private BookSaveHeaderPayload header() {
-            return header;
-        }
-
-        private boolean accept(BookSaveChunkPayload chunk) {
-            if (chunk.chunkIndex() != nextChunkIndex || nextChunkIndex >= header.chunkCount()) {
-                return false;
-            }
-            int remaining = header.totalBytes() - bytes.size();
-            int expectedLength = Math.min(DOCUMENT_CHUNK_BYTES, remaining);
-            if (chunk.bytes().length != expectedLength) {
-                return false;
-            }
-            bytes.writeBytes(chunk.bytes());
-            nextChunkIndex++;
-            lastActivityNanos = System.nanoTime();
-            return true;
-        }
-
-        private boolean isComplete() {
-            return nextChunkIndex == header.chunkCount() && bytes.size() == header.totalBytes();
-        }
-
-        private byte[] bytes() {
-            return bytes.toByteArray();
-        }
-
-        private boolean isExpired(long nowNanos) {
-            return nowNanos - lastActivityNanos > TRANSFER_TIMEOUT_NANOS;
-        }
+        private BookSaveHeaderPayload header() { return header; }
+        private boolean accept(BookSaveChunkPayload chunk) { return buffer.accept(chunk.chunkIndex(), chunk.bytes()); }
+        private boolean isComplete() { return buffer.isComplete(); }
+        private byte[] bytes() { return buffer.bytes(); }
+        private boolean isExpired(long nowNanos) { return buffer.isExpired(nowNanos); }
     }
 
     /**
@@ -1336,513 +1066,5 @@ public final class BookNetwork {
         }
     }
 
-    record BookOpenRequestPayload(long requestId, InteractionHand hand, BookPointer cachedPointer)
-            implements CustomPacketPayload {
-        static final Type<BookOpenRequestPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "book_open_request"));
-        static final StreamCodec<RegistryFriendlyByteBuf, BookOpenRequestPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(BookOpenRequestPayload::write, BookOpenRequestPayload::read);
 
-        BookOpenRequestPayload {
-            if (!isRequestIdValid(requestId) || hand == null) {
-                throw new IllegalArgumentException("Invalid book-open request");
-            }
-        }
-
-        private static BookOpenRequestPayload read(RegistryFriendlyByteBuf buffer) {
-            long requestId = buffer.readLong();
-            int handOrdinal = buffer.readUnsignedByte();
-            InteractionHand[] hands = InteractionHand.values();
-            if (handOrdinal >= hands.length) {
-                throw new IllegalArgumentException("Invalid interaction hand");
-            }
-            boolean hasCachedPointer = buffer.readBoolean();
-            BookPointer cachedPointer = hasCachedPointer ? readPointer(buffer) : null;
-            return new BookOpenRequestPayload(requestId, hands[handOrdinal], cachedPointer);
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            buffer.writeByte(hand.ordinal());
-            buffer.writeBoolean(cachedPointer != null);
-            if (cachedPointer != null) {
-                writePointer(buffer, cachedPointer);
-            }
-        }
-
-        @Override
-        public Type<BookOpenRequestPayload> type() {
-            return TYPE;
-        }
-    }
-
-    record BookOpenHeaderPayload(long requestId, InteractionHand hand, BookPointer pointer, boolean canEdit,
-            boolean canChangeLock, boolean documentBodyOmitted, int totalBytes, int chunkCount)
-            implements CustomPacketPayload {
-        static final Type<BookOpenHeaderPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "book_open_header"));
-        static final StreamCodec<RegistryFriendlyByteBuf, BookOpenHeaderPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(BookOpenHeaderPayload::write, BookOpenHeaderPayload::read);
-
-        BookOpenHeaderPayload {
-            boolean validBodyShape = documentBodyOmitted
-                    ? totalBytes == 0 && chunkCount == 0
-                    : totalBytes > 0 && totalBytes <= MAX_DOCUMENT_BYTES
-                    && chunkCount == chunkCountFor(totalBytes);
-            if (!isRequestIdValid(requestId) || hand == null || pointer == null || !validBodyShape) {
-                throw new IllegalArgumentException("Invalid book-open header");
-            }
-        }
-
-        private static BookOpenHeaderPayload read(RegistryFriendlyByteBuf buffer) {
-            long requestId = buffer.readLong();
-            int handOrdinal = buffer.readUnsignedByte();
-            InteractionHand[] hands = InteractionHand.values();
-            if (handOrdinal >= hands.length) {
-                throw new IllegalArgumentException("Invalid interaction hand");
-            }
-            BookPointer pointer = new BookPointer(buffer.readUUID(), buffer.readUtf(64), buffer.readBoolean());
-            boolean canEdit = buffer.readBoolean();
-            boolean canChangeLock = buffer.readBoolean();
-            boolean documentBodyOmitted = buffer.readBoolean();
-            int totalBytes = buffer.readVarInt();
-            int chunkCount = buffer.readVarInt();
-            return new BookOpenHeaderPayload(requestId, hands[handOrdinal], pointer, canEdit, canChangeLock,
-                    documentBodyOmitted, totalBytes, chunkCount);
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            buffer.writeByte(hand.ordinal());
-            buffer.writeUUID(pointer.bookId());
-            buffer.writeUtf(pointer.contentHash(), 64);
-            buffer.writeBoolean(pointer.locked());
-            buffer.writeBoolean(canEdit);
-            buffer.writeBoolean(canChangeLock);
-            buffer.writeBoolean(documentBodyOmitted);
-            buffer.writeVarInt(totalBytes);
-            buffer.writeVarInt(chunkCount);
-        }
-
-        @Override
-        public Type<BookOpenHeaderPayload> type() {
-            return TYPE;
-        }
-    }
-
-    record BookOpenChunkPayload(long requestId, int chunkIndex, byte[] bytes) implements CustomPacketPayload {
-        static final Type<BookOpenChunkPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "book_open_chunk"));
-        static final StreamCodec<RegistryFriendlyByteBuf, BookOpenChunkPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(BookOpenChunkPayload::write, BookOpenChunkPayload::read);
-
-        BookOpenChunkPayload {
-            if (!isRequestIdValid(requestId) || chunkIndex < 0 || chunkIndex >= MAX_DOCUMENT_CHUNKS
-                    || bytes == null || bytes.length <= 0 || bytes.length > DOCUMENT_CHUNK_BYTES) {
-                throw new IllegalArgumentException("Invalid book-open chunk");
-            }
-            bytes = Arrays.copyOf(bytes, bytes.length);
-        }
-
-        @Override
-        public byte[] bytes() {
-            return Arrays.copyOf(bytes, bytes.length);
-        }
-
-        private static BookOpenChunkPayload read(RegistryFriendlyByteBuf buffer) {
-            return new BookOpenChunkPayload(buffer.readLong(), buffer.readVarInt(),
-                    buffer.readByteArray(DOCUMENT_CHUNK_BYTES));
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            buffer.writeVarInt(chunkIndex);
-            buffer.writeByteArray(bytes);
-        }
-
-        @Override
-        public Type<BookOpenChunkPayload> type() {
-            return TYPE;
-        }
-    }
-
-    record BookOpenFailurePayload(long requestId, String reason) implements CustomPacketPayload {
-        static final Type<BookOpenFailurePayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "book_open_failure"));
-        static final StreamCodec<RegistryFriendlyByteBuf, BookOpenFailurePayload> STREAM_CODEC =
-                CustomPacketPayload.codec(BookOpenFailurePayload::write, BookOpenFailurePayload::read);
-
-        BookOpenFailurePayload {
-            if (!isRequestIdValid(requestId) || reason == null || reason.isBlank()
-                    || reason.length() > MAX_FAILURE_MESSAGE_CHARS) {
-                throw new IllegalArgumentException("Invalid book-open failure");
-            }
-        }
-
-        private static BookOpenFailurePayload read(RegistryFriendlyByteBuf buffer) {
-            return new BookOpenFailurePayload(buffer.readLong(), buffer.readUtf(MAX_FAILURE_MESSAGE_CHARS));
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            buffer.writeUtf(reason, MAX_FAILURE_MESSAGE_CHARS);
-        }
-
-        @Override
-        public Type<BookOpenFailurePayload> type() {
-            return TYPE;
-        }
-    }
-
-    record ImageUploadHeaderPayload(long requestId, InteractionHand hand, BookPointer originalPointer,
-            String assetHash, int totalBytes, int chunkCount)
-            implements CustomPacketPayload {
-        static final Type<ImageUploadHeaderPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "image_upload_header"));
-        static final StreamCodec<RegistryFriendlyByteBuf, ImageUploadHeaderPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(ImageUploadHeaderPayload::write, ImageUploadHeaderPayload::read);
-
-        ImageUploadHeaderPayload {
-            if (!isRequestIdValid(requestId) || hand == null || originalPointer == null || !isAssetHashValid(assetHash)
-                    || totalBytes <= 0 || totalBytes > MAX_IMAGE_BYTES || chunkCount != imageChunkCountFor(totalBytes)) {
-                throw new IllegalArgumentException("Invalid image-upload header");
-            }
-        }
-
-        private static ImageUploadHeaderPayload read(RegistryFriendlyByteBuf buffer) {
-            long requestId = buffer.readLong();
-            InteractionHand hand = readHand(buffer);
-            BookPointer originalPointer = readPointer(buffer);
-            return new ImageUploadHeaderPayload(requestId, hand, originalPointer, buffer.readUtf(64),
-                    buffer.readVarInt(), buffer.readVarInt());
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            writeHand(buffer, hand);
-            writePointer(buffer, originalPointer);
-            buffer.writeUtf(assetHash, 64);
-            buffer.writeVarInt(totalBytes);
-            buffer.writeVarInt(chunkCount);
-        }
-
-        @Override
-        public Type<ImageUploadHeaderPayload> type() {
-            return TYPE;
-        }
-    }
-
-    record ImageUploadChunkPayload(long requestId, String assetHash, int chunkIndex, byte[] bytes)
-            implements CustomPacketPayload {
-        static final Type<ImageUploadChunkPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "image_upload_chunk"));
-        static final StreamCodec<RegistryFriendlyByteBuf, ImageUploadChunkPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(ImageUploadChunkPayload::write, ImageUploadChunkPayload::read);
-
-        ImageUploadChunkPayload {
-            if (!isRequestIdValid(requestId) || !isAssetHashValid(assetHash)
-                    || chunkIndex < 0 || chunkIndex >= MAX_IMAGE_CHUNKS
-                    || bytes == null || bytes.length <= 0 || bytes.length > IMAGE_CHUNK_BYTES) {
-                throw new IllegalArgumentException("Invalid image-upload chunk");
-            }
-            bytes = Arrays.copyOf(bytes, bytes.length);
-        }
-
-        @Override
-        public byte[] bytes() {
-            return Arrays.copyOf(bytes, bytes.length);
-        }
-
-        private static ImageUploadChunkPayload read(RegistryFriendlyByteBuf buffer) {
-            return new ImageUploadChunkPayload(buffer.readLong(), buffer.readUtf(64), buffer.readVarInt(),
-                    buffer.readByteArray(IMAGE_CHUNK_BYTES));
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            buffer.writeUtf(assetHash, 64);
-            buffer.writeVarInt(chunkIndex);
-            buffer.writeByteArray(bytes);
-        }
-
-        @Override
-        public Type<ImageUploadChunkPayload> type() {
-            return TYPE;
-        }
-    }
-
-    record ImageOpenHeaderPayload(long requestId, String assetHash, int totalBytes, int chunkCount)
-            implements CustomPacketPayload {
-        static final Type<ImageOpenHeaderPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "image_open_header"));
-        static final StreamCodec<RegistryFriendlyByteBuf, ImageOpenHeaderPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(ImageOpenHeaderPayload::write, ImageOpenHeaderPayload::read);
-
-        ImageOpenHeaderPayload {
-            if (!isRequestIdValid(requestId) || !isAssetHashValid(assetHash)
-                    || totalBytes <= 0 || totalBytes > MAX_IMAGE_BYTES || chunkCount != imageChunkCountFor(totalBytes)) {
-                throw new IllegalArgumentException("Invalid image-open header");
-            }
-        }
-
-        private static ImageOpenHeaderPayload read(RegistryFriendlyByteBuf buffer) {
-            return new ImageOpenHeaderPayload(buffer.readLong(), buffer.readUtf(64), buffer.readVarInt(),
-                    buffer.readVarInt());
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            buffer.writeUtf(assetHash, 64);
-            buffer.writeVarInt(totalBytes);
-            buffer.writeVarInt(chunkCount);
-        }
-
-        @Override
-        public Type<ImageOpenHeaderPayload> type() {
-            return TYPE;
-        }
-    }
-
-    record ImageOpenChunkPayload(long requestId, String assetHash, int chunkIndex, byte[] bytes)
-            implements CustomPacketPayload {
-        static final Type<ImageOpenChunkPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "image_open_chunk"));
-        static final StreamCodec<RegistryFriendlyByteBuf, ImageOpenChunkPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(ImageOpenChunkPayload::write, ImageOpenChunkPayload::read);
-
-        ImageOpenChunkPayload {
-            if (!isRequestIdValid(requestId) || !isAssetHashValid(assetHash)
-                    || chunkIndex < 0 || chunkIndex >= MAX_IMAGE_CHUNKS
-                    || bytes == null || bytes.length <= 0 || bytes.length > IMAGE_CHUNK_BYTES) {
-                throw new IllegalArgumentException("Invalid image-open chunk");
-            }
-            bytes = Arrays.copyOf(bytes, bytes.length);
-        }
-
-        @Override
-        public byte[] bytes() {
-            return Arrays.copyOf(bytes, bytes.length);
-        }
-
-        private static ImageOpenChunkPayload read(RegistryFriendlyByteBuf buffer) {
-            return new ImageOpenChunkPayload(buffer.readLong(), buffer.readUtf(64), buffer.readVarInt(),
-                    buffer.readByteArray(IMAGE_CHUNK_BYTES));
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            buffer.writeUtf(assetHash, 64);
-            buffer.writeVarInt(chunkIndex);
-            buffer.writeByteArray(bytes);
-        }
-
-        @Override
-        public Type<ImageOpenChunkPayload> type() {
-            return TYPE;
-        }
-    }
-
-    record ImageUploadResultPayload(long requestId, String assetHash, boolean success, String reason)
-            implements CustomPacketPayload {
-        static final Type<ImageUploadResultPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "image_upload_result"));
-        static final StreamCodec<RegistryFriendlyByteBuf, ImageUploadResultPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(ImageUploadResultPayload::write, ImageUploadResultPayload::read);
-
-        ImageUploadResultPayload {
-            if (!isRequestIdValid(requestId) || !isAssetHashValid(assetHash) || reason == null
-                    || reason.length() > MAX_FAILURE_MESSAGE_CHARS || (!success && reason.isBlank())) {
-                throw new IllegalArgumentException("Invalid image-upload result");
-            }
-        }
-
-        private static ImageUploadResultPayload read(RegistryFriendlyByteBuf buffer) {
-            return new ImageUploadResultPayload(buffer.readLong(), buffer.readUtf(64), buffer.readBoolean(),
-                    buffer.readUtf(MAX_FAILURE_MESSAGE_CHARS));
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            buffer.writeUtf(assetHash, 64);
-            buffer.writeBoolean(success);
-            buffer.writeUtf(reason, MAX_FAILURE_MESSAGE_CHARS);
-        }
-
-        @Override
-        public Type<ImageUploadResultPayload> type() {
-            return TYPE;
-        }
-    }
-
-    record BookSaveHeaderPayload(long requestId, InteractionHand hand, BookPointer originalPointer,
-            int totalBytes, int chunkCount) implements CustomPacketPayload {
-        static final Type<BookSaveHeaderPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "book_save_header"));
-        static final StreamCodec<RegistryFriendlyByteBuf, BookSaveHeaderPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(BookSaveHeaderPayload::write, BookSaveHeaderPayload::read);
-
-        BookSaveHeaderPayload {
-            if (!isRequestIdValid(requestId) || hand == null || originalPointer == null
-                    || totalBytes <= 0 || totalBytes > MAX_DOCUMENT_BYTES
-                    || chunkCount != chunkCountFor(totalBytes)) {
-                throw new IllegalArgumentException("Invalid book-save header");
-            }
-        }
-
-        private static BookSaveHeaderPayload read(RegistryFriendlyByteBuf buffer) {
-            long requestId = buffer.readLong();
-            InteractionHand hand = readHand(buffer);
-            BookPointer originalPointer = readPointer(buffer);
-            int totalBytes = buffer.readVarInt();
-            int chunkCount = buffer.readVarInt();
-            return new BookSaveHeaderPayload(requestId, hand, originalPointer, totalBytes, chunkCount);
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            writeHand(buffer, hand);
-            writePointer(buffer, originalPointer);
-            buffer.writeVarInt(totalBytes);
-            buffer.writeVarInt(chunkCount);
-        }
-
-        @Override
-        public Type<BookSaveHeaderPayload> type() {
-            return TYPE;
-        }
-    }
-
-    /** Compact request for a pure access-control change on a held physical copy. */
-    record BookLockRequestPayload(long requestId, InteractionHand hand, BookPointer originalPointer,
-            boolean locked) implements CustomPacketPayload {
-        static final Type<BookLockRequestPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "book_lock_request"));
-        static final StreamCodec<RegistryFriendlyByteBuf, BookLockRequestPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(BookLockRequestPayload::write, BookLockRequestPayload::read);
-
-        BookLockRequestPayload {
-            if (!isRequestIdValid(requestId) || hand == null || originalPointer == null) {
-                throw new IllegalArgumentException("Invalid book-lock request");
-            }
-        }
-
-        private static BookLockRequestPayload read(RegistryFriendlyByteBuf buffer) {
-            return new BookLockRequestPayload(buffer.readLong(), readHand(buffer), readPointer(buffer),
-                    buffer.readBoolean());
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            writeHand(buffer, hand);
-            writePointer(buffer, originalPointer);
-            buffer.writeBoolean(locked);
-        }
-
-        @Override
-        public Type<BookLockRequestPayload> type() {
-            return TYPE;
-        }
-    }
-
-    record BookSaveChunkPayload(long requestId, int chunkIndex, byte[] bytes) implements CustomPacketPayload {
-        static final Type<BookSaveChunkPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "book_save_chunk"));
-        static final StreamCodec<RegistryFriendlyByteBuf, BookSaveChunkPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(BookSaveChunkPayload::write, BookSaveChunkPayload::read);
-
-        BookSaveChunkPayload {
-            if (!isRequestIdValid(requestId) || chunkIndex < 0 || chunkIndex >= MAX_DOCUMENT_CHUNKS
-                    || bytes == null || bytes.length <= 0 || bytes.length > DOCUMENT_CHUNK_BYTES) {
-                throw new IllegalArgumentException("Invalid book-save chunk");
-            }
-            bytes = Arrays.copyOf(bytes, bytes.length);
-        }
-
-        @Override
-        public byte[] bytes() {
-            return Arrays.copyOf(bytes, bytes.length);
-        }
-
-        private static BookSaveChunkPayload read(RegistryFriendlyByteBuf buffer) {
-            return new BookSaveChunkPayload(buffer.readLong(), buffer.readVarInt(),
-                    buffer.readByteArray(DOCUMENT_CHUNK_BYTES));
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            buffer.writeVarInt(chunkIndex);
-            buffer.writeByteArray(bytes);
-        }
-
-        @Override
-        public Type<BookSaveChunkPayload> type() {
-            return TYPE;
-        }
-    }
-
-    record BookSaveSuccessPayload(long requestId, InteractionHand hand, BookPointer pointer,
-            SaveOutcome outcome) implements CustomPacketPayload {
-        static final Type<BookSaveSuccessPayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "book_save_success"));
-        static final StreamCodec<RegistryFriendlyByteBuf, BookSaveSuccessPayload> STREAM_CODEC =
-                CustomPacketPayload.codec(BookSaveSuccessPayload::write, BookSaveSuccessPayload::read);
-
-        BookSaveSuccessPayload {
-            if (!isRequestIdValid(requestId) || hand == null || pointer == null || outcome == null) {
-                throw new IllegalArgumentException("Invalid book-save success");
-            }
-        }
-
-        private static BookSaveSuccessPayload read(RegistryFriendlyByteBuf buffer) {
-            long requestId = buffer.readLong();
-            InteractionHand hand = readHand(buffer);
-            BookPointer pointer = readPointer(buffer);
-            int outcomeOrdinal = buffer.readUnsignedByte();
-            SaveOutcome[] outcomes = SaveOutcome.values();
-            if (outcomeOrdinal >= outcomes.length) {
-                throw new IllegalArgumentException("Invalid book-save outcome");
-            }
-            return new BookSaveSuccessPayload(requestId, hand, pointer, outcomes[outcomeOrdinal]);
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            writeHand(buffer, hand);
-            writePointer(buffer, pointer);
-            buffer.writeByte(outcome.ordinal());
-        }
-
-        @Override
-        public Type<BookSaveSuccessPayload> type() {
-            return TYPE;
-        }
-    }
-
-    record BookSaveFailurePayload(long requestId, String reason) implements CustomPacketPayload {
-        static final Type<BookSaveFailurePayload> TYPE = new Type<>(
-                ResourceLocation.fromNamespaceAndPath(WritableBookWikiMod.MOD_ID, "book_save_failure"));
-        static final StreamCodec<RegistryFriendlyByteBuf, BookSaveFailurePayload> STREAM_CODEC =
-                CustomPacketPayload.codec(BookSaveFailurePayload::write, BookSaveFailurePayload::read);
-
-        BookSaveFailurePayload {
-            if (!isRequestIdValid(requestId) || reason == null || reason.isBlank()
-                    || reason.length() > MAX_FAILURE_MESSAGE_CHARS) {
-                throw new IllegalArgumentException("Invalid book-save failure");
-            }
-        }
-
-        private static BookSaveFailurePayload read(RegistryFriendlyByteBuf buffer) {
-            return new BookSaveFailurePayload(buffer.readLong(), buffer.readUtf(MAX_FAILURE_MESSAGE_CHARS));
-        }
-
-        private void write(RegistryFriendlyByteBuf buffer) {
-            buffer.writeLong(requestId);
-            buffer.writeUtf(reason, MAX_FAILURE_MESSAGE_CHARS);
-        }
-
-        @Override
-        public Type<BookSaveFailurePayload> type() {
-            return TYPE;
-        }
-    }
 }

@@ -1,0 +1,15 @@
+PASS
+loaded production classes from JAR: union:/<workspace>/.tools/release-validation/server/mods/Writable%20Book%20Wiki-0.1.4-NeoForge-1.21.1.jar%23121!/
+running dedicated server with real world and registries
+original index entry persisted before repository auto-repair can run
+changed index entry persisted before repository auto-repair can run
+original copy reads identically after full process restart
+edited rich document reads identically after full process restart
+fork identity and creative unlock survive restart
+item display name survives NBT reload
+image bytes retain content hash after restart
+persisted image decodes at original resolution
+placed Wiki book survives real server process restart
+lectern NBT preserves exact book pointer
+lectern page count shared page and comparator survive reload
+table and authored page survive restart

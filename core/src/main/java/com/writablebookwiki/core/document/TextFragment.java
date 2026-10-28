@@ -14,6 +14,6 @@ public record TextFragment(List<Part> parts) {
     }
 
     public String plainText() {
-        return parts.stream().map(p -> WikiDocumentEditor.blockText(p.block())).collect(Collectors.joining("\n"));
+        return parts.stream().map(p -> TextRunEdits.blockText(p.block())).collect(Collectors.joining("\n"));
     }
 }

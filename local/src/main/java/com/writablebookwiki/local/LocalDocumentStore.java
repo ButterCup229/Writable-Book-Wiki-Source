@@ -1,13 +1,13 @@
 package com.writablebookwiki.local;
 
+import com.writablebookwiki.local.storage.AtomicFiles;
+
 import com.writablebookwiki.core.document.DocumentFormatException;
 import com.writablebookwiki.core.document.WikiDocument;
 import com.writablebookwiki.core.document.WikiDocumentCodec;
 import java.io.IOException;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -49,26 +49,7 @@ public final class LocalDocumentStore {
      * a partly-written document at the final path.
      */
     public void save(WikiDocument document) throws IOException {
-        Objects.requireNonNull(document, "document");
-        Path directory = documentFile.getParent();
-        if (directory == null) {
-            throw new IOException("Local document file must have a parent directory");
-        }
-        Files.createDirectories(directory);
-        Path temporary = Files.createTempFile(directory, documentFile.getFileName().toString(), ".part");
-        boolean completed = false;
-        try {
-            Files.write(temporary, codec.encode(document));
-            try {
-                Files.move(temporary, documentFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException exception) {
-                Files.move(temporary, documentFile, StandardCopyOption.REPLACE_EXISTING);
-            }
-            completed = true;
-        } finally {
-            if (!completed) {
-                Files.deleteIfExists(temporary);
-            }
-        }
+        byte[] encoded = codec.encode(Objects.requireNonNull(document, "document"));
+        AtomicFiles.writeBytes(documentFile, encoded);
     }
 }

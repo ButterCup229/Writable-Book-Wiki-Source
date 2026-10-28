@@ -1,0 +1,2 @@
+core tests=109 failures=0 errors=0
+local tests=59 failures=0 errors=0

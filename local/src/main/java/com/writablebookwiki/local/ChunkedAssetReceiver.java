@@ -36,8 +36,14 @@ public final class ChunkedAssetReceiver implements AutoCloseable {
         Path directory = Objects.requireNonNull(temporaryDirectory, "temporaryDirectory").toAbsolutePath().normalize();
         validateHeader(expectedHash, totalBytes, chunkCount, chunkBytes);
         Files.createDirectories(directory);
-        return new ChunkedAssetReceiver(expectedHash, totalBytes, chunkCount, chunkBytes,
-                Files.createTempFile(directory, Objects.requireNonNull(filePrefix, "filePrefix"), ".part"));
+        Path temporary = Files.createTempFile(directory, Objects.requireNonNull(filePrefix, "filePrefix"), ".part");
+        try {
+            return new ChunkedAssetReceiver(expectedHash, totalBytes, chunkCount, chunkBytes, temporary);
+        } catch (IOException | RuntimeException failure) {
+            try { Files.deleteIfExists(temporary); }
+            catch (IOException cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
+        }
     }
 
     private ChunkedAssetReceiver(String expectedHash, int totalBytes, int chunkCount, int chunkBytes, Path temporaryFile)
@@ -78,30 +84,34 @@ public final class ChunkedAssetReceiver implements AutoCloseable {
      * store or delete it after use.
      */
     public Optional<Path> finish() throws IOException {
-        if (finalized) {
-            return Optional.empty();
+        if (finalized) return Optional.empty();
+        try {
+            closeOutput();
+            if (!isComplete() || !expectedHash.equals(HexFormat.of().formatHex(digest.digest()))) {
+                discard();
+                return Optional.empty();
+            }
+            finalized = true; // Ownership transfers to the caller only after validation.
+            return Optional.of(temporaryFile);
+        } catch (IOException failure) {
+            discard();
+            throw failure;
         }
-        finalized = true;
-        closeOutput();
-        if (!isComplete() || !expectedHash.equals(HexFormat.of().formatHex(digest.digest()))) {
-            Files.deleteIfExists(temporaryFile);
-            return Optional.empty();
-        }
-        return Optional.of(temporaryFile);
     }
 
     /** Abandons the transfer and removes its incomplete file. */
     public void discard() {
-        if (finalized) {
-            return;
-        }
+        if (finalized) return;
         finalized = true;
         try {
             closeOutput();
-            Files.deleteIfExists(temporaryFile);
         } catch (IOException ignored) {
-            // A later client/server startup may clean an orphaned temporary
-            // file; the transfer never becomes a visible final asset.
+            // Still attempt deletion when closing fails.
+        } finally {
+            try { Files.deleteIfExists(temporaryFile); }
+            catch (IOException ignored) {
+                // An inaccessible orphan is never published as a final asset.
+            }
         }
     }
 

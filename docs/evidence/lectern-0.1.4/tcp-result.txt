@@ -1,0 +1,16 @@
+PASS
+TCP placement displays book on vanilla lectern
+server inventory sync consumes survival book
+network reply opens native read-only lectern session
+lectern comments reuse local book annotation namespace
+TCP body retains images and tables
+survival reader has take-book control
+read mode ignores body typing
+native next-page sends vanilla menu packet and remains on page two
+page turn reuses the same screen without closing
+other server reader's turn reaches real client through menu data sync
+Escape closes native reader and server menu
+reopening resumes lectern shared page
+take button removes book and closes reader over TCP
+taken inventory book retains ID
+vanilla book still opens vanilla lectern screen

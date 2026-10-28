@@ -9,6 +9,17 @@ public final class TextNavigation {
     private static final Pattern GRAPHEME = Pattern.compile("\\X");
     private TextNavigation() { }
 
+    /** Clamp a hit-test or wrapped-line offset to the start of the visible character it hits. */
+    public static int boundaryAtOrBefore(String text, int column) {
+        column = Math.max(0, Math.min(column, text.length()));
+        if (column == 0 || column == text.length()) return column;
+        var matcher = GRAPHEME.matcher(text);
+        while (matcher.find()) {
+            if (matcher.start() <= column && column < matcher.end()) return matcher.start();
+        }
+        return column;
+    }
+
     public static int character(String text, int column, int direction) {
         column = Math.max(0, Math.min(column, text.length()));
         var matcher = GRAPHEME.matcher(text);

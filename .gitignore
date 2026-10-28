@@ -8,3 +8,6 @@ run/
 run-*/
 .idea/
 *.iml
+
+# Local recovery copies; never publish player/development snapshots.
+backups/

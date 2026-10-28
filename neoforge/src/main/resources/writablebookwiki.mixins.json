@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.writablebookwiki.neoforge.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "LecternBlockEntityMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

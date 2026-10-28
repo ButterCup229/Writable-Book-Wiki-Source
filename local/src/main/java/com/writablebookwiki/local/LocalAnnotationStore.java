@@ -1,11 +1,11 @@
 package com.writablebookwiki.local;
 
+import com.writablebookwiki.local.storage.AtomicFiles;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -131,23 +131,7 @@ public final class LocalAnnotationStore {
     }
 
     private void writeAtomically(Path annotationFile, String annotation) throws IOException {
-        Files.createDirectories(directory);
-        Path temporary = Files.createTempFile(directory, annotationFile.getFileName().toString(), ".part");
-        boolean completed = false;
-        try {
-            Files.writeString(temporary, annotation, StandardCharsets.UTF_8);
-            try {
-                Files.move(temporary, annotationFile, StandardCopyOption.ATOMIC_MOVE,
-                        StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException exception) {
-                Files.move(temporary, annotationFile, StandardCopyOption.REPLACE_EXISTING);
-            }
-            completed = true;
-        } finally {
-            if (!completed) {
-                Files.deleteIfExists(temporary);
-            }
-        }
+        AtomicFiles.writeUtf8(annotationFile, annotation);
     }
 
     private Path annotationFile(String documentKey) {

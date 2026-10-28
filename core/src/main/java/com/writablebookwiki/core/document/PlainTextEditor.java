@@ -28,7 +28,7 @@ public final class PlainTextEditor {
         typing = false;
     }
     public void moveTo(int position, boolean extend) {
-        caret = Math.max(0, Math.min(position, text.length()));
+        caret = TextNavigation.boundaryAtOrBefore(text, position);
         if (!extend) anchor = caret;
         typing = false;
     }

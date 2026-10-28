@@ -1,0 +1,4 @@
+RELEASE_JAR_PASS
+Writable Book Wiki-0.1.3-NeoForge-1.21.1.jar
+bytes=464445
+sha256=258df0da0d419f88916f37bfb470281680fac7a8dd11fdd795aba59c02fa68fc

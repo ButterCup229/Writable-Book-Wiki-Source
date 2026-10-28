@@ -24,8 +24,16 @@ public final class WritableBookWikiClientGameEvents {
     }
 
     @SubscribeEvent
+    public static void onLogout(net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent.LoggingOut event) {
+        ClientBookSessions.disconnect();
+        BookNetwork.disconnectClient();
+    }
+
+    @SubscribeEvent
     public static void onClientTick(ClientTickEvent.Post event) {
         BookNetwork.expireClientTransfers();
+        ClientLecternBooks.tick();
+        WikiWindow.tick();
         StandaloneGlfwProofWindow.openForDevelopmentIfRequested();
         if (Boolean.getBoolean("writablebookwiki.nativePreview") && !developmentPreviewOpened) {
             developmentPreviewOpened = true;

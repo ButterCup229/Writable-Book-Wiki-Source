@@ -2,16 +2,6 @@
 
 面向 **Minecraft 1.21.1 / NeoForge** 的可编写 Wiki 书 Mod：以 Word 式所见即所得编辑正文，用目录组织内容，并将个人批注保存在玩家本机。
 
-## 下载安装
-
-**[点击下载 Writable Book Wiki 0.1.1（NeoForge / Minecraft 1.21.1）](https://github.com/ButterCup229/Writable-Book-Wiki-Source/raw/refs/heads/main/downloads/Writable%20Book%20Wiki-0.1.1-NeoForge-1.21.1.jar)**
-
-安装 Java 21 与 NeoForge 21.1.250 或更新的 1.21.1 版本后，将下载的 JAR 放进当前游戏实例的 `mods` 文件夹即可。无需自行编译，也不需要 LDLib2。多人使用时，客户端和服务器都安装对应版本。
-
-文件大小：431,161 字节（约 421 KiB）。SHA-256：`f0e1cbc823bceb9c061c4baae25f85c4387fb6fa0816976b0869c5ffdb04f00e`。
-
-## 基本信息
-
 - 模组名称：`Writable Book Wiki`
 - MODID：`writablebookwiki`
 - Java：21
@@ -19,6 +9,27 @@
 - 不需要 LDLib2 或额外 UI 前置 Mod。
 
 这是一个新 Mod，数据只使用自己的 `writablebookwiki` 命名空间，不提供旧 Mod／历史开发版本的数据适配或自动迁移。
+
+## 下载安装（0.1.4）
+
+**[下载 Writable Book Wiki 0.1.4，NeoForge / Minecraft 1.21.1](https://github.com/ButterCup229/Writable-Book-Wiki-Source/raw/refs/heads/main/downloads/Writable%20Book%20Wiki-0.1.4-NeoForge-1.21.1.jar)**
+
+安装 Java 21 与 NeoForge 21.1.250 或更新的 1.21.1 版本，将 JAR 放进游戏实例的 `mods` 文件夹。客户端和服务器一起更新，替换旧版本，不要同时保留多个本 Mod JAR。
+
+文件大小：479,103 字节。SHA-256：`e1297c93d6f5840d548b6222cb56708b1b23ee8b73ad51c5c0f71b4fa89d51a2`。
+
+## 0.1.4 更新
+
+- 支持原版讲台：手持书右键放入，其他玩家右键阅读，页码共享；右上角“取书”拿回后再按原有权限编辑。
+- 讲台中的书、图片、页码随世界存档保存，破坏讲台正常掉书；个人批注仍各自保存在本机。
+- 包含 0.1.2 / 0.1.3 的模块职责、传输、存储和输入重构，以及批注失败恢复、快捷键、书名保存等修复。
+- 保持已有书籍和正文 Hash 规则，不依赖 LDLib2。
+
+本地验收：168 项单元测试、506 项客户端回归、67 项专用服务器检查、14 项重启读档检查、15 项真实客户端 TCP 连服检查全部通过。TCP 验收使用一个图形客户端与服务器模拟另一名读者；不等同于两台玩家电脑的跨网测试。
+
+- [讲台用法与验证范围](docs/2026-10-29-讲台共享阅读-0.1.4.md)
+- [架构与功能入口](docs/2026-10-29-系统性重构与架构验收.md)
+- [维护、验证及恢复手册](docs/维护与交付手册.md)
 
 ## 源码模块
 
@@ -78,9 +89,9 @@
 安装 Java 21 后，在项目根目录使用 Gradle Wrapper：
 
 ```powershell
-.\gradlew.bat :core:test :local:test :neoforge:build
+.\gradlew.bat verifyAll
 ```
 
 Linux／macOS 使用 `./gradlew`。正式 Mod JAR 位于 `neoforge/build/libs/`，命名格式为 `Writable Book Wiki-<版本>-NeoForge-1.21.1.jar`；不要把 `-sources.jar` 当作游戏 Mod 安装。
 
-本库包含源码、构建文件、自动测试、测试资源、本说明，以及 `downloads/` 中可直接安装的成品 JAR；不包含玩家存档、个人配置、缓存或开发运行环境。
+本库包含源码、构建文件、自动测试、测试资源及本说明；不包含玩家存档、个人配置、缓存或开发运行环境。

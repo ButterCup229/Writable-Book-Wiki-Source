@@ -1,12 +1,12 @@
 package com.writablebookwiki.local;
 
+import com.writablebookwiki.local.storage.AtomicFiles;
+
 import java.io.IOException;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Properties;
 
 /** Reader appearance is a local preference, never part of a shared book or its hash. */
@@ -32,18 +32,7 @@ public final class LocalAppearanceStore {
 
     public void savePaperColor(int rgb) throws IOException {
         if ((rgb & 0xFF000000) != 0) throw new IllegalArgumentException("Expected a 24-bit RGB colour");
-        Files.createDirectories(file.getParent());
-        Path temporary = Files.createTempFile(file.getParent(), "appearance-", ".tmp");
-        try {
-            Files.writeString(temporary, "# Local reader appearance; never uploaded with books\npaper_color=#%06X\n".formatted(rgb),
-                    StandardCharsets.UTF_8);
-            try {
-                Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException unsupported) {
-                Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING);
-            }
-        } finally {
-            Files.deleteIfExists(temporary);
-        }
+        AtomicFiles.writeUtf8(file,
+                "# Local reader appearance; never uploaded with books\npaper_color=#%06X\n".formatted(rgb));
     }
 }

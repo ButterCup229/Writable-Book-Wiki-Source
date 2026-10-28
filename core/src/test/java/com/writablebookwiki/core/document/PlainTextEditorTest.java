@@ -40,6 +40,24 @@ class PlainTextEditorTest {
         text.redo();
         assertEquals("aef", text.text());
     }
+    @Test void hitTestAndVerticalMovementCannotPlaceCaretInsideGrapheme() {
+        var text = new PlainTextEditor();
+        text.reset("Ae\u0301👩‍💻B");
+        text.moveTo(2, false);
+        assertEquals(1, text.caret());
+        text.delete(1, false);
+        assertEquals("A👩‍💻B", text.text());
+        text.undo();
+        for (int offset = 4; offset < 8; offset++) {
+            text.moveTo(offset, false);
+            assertEquals(3, text.caret());
+        }
+        text.moveTo(8, true);
+        assertEquals("👩‍💻", text.selectedText());
+        text.replaceSelection("new");
+        assertEquals("Ae\u0301newB", text.text());
+    }
+
     @Test void deleteNeverSplitsEmojiOrCombiningCharacter() {
         var text = new PlainTextEditor();
         text.reset("e\u0301👩‍💻");

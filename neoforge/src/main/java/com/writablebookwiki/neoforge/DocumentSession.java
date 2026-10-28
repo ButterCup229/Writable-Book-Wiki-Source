@@ -11,6 +11,14 @@ import java.nio.file.Path;
  * and edit still use the same {@link WikiDocument} and the same renderer.
  */
 interface DocumentSession {
+    /** Optional live-container lifecycle. Ordinary held/local documents have no container. */
+    default boolean isValid() { return true; }
+    default int sharedPage() { return -1; }
+    default void changePage(int page) { }
+    default boolean canTakeBook() { return false; }
+    default void takeBook() { }
+    default void close() { }
+
     /** Whether the current holder may enter edit mode. */
     boolean canEdit();
 

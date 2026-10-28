@@ -102,7 +102,12 @@ class DocxIOTest {
     }
     @Test void maliciousXmlExternalImagesAndFailedExportCannotOverwriteExistingFile() throws Exception {
         Path invalid=root.resolve("xxe.docx");
-        try(ZipOutputStream zip=new ZipOutputStream(Files.newOutputStream(invalid))){DocxIO.put(zip,"word/document.xml","<!DOCTYPE document [<!ENTITY x SYSTEM 'file:///C:/secret'>]><document>&x;</document>");}
+        try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(invalid))) {
+            zip.putNextEntry(new java.util.zip.ZipEntry("word/document.xml"));
+            zip.write("<!DOCTYPE document [<!ENTITY x SYSTEM 'file:///C:/secret'>]><document>&x;</document>"
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
         assertThrows(IOException.class,()->DocxIO.read(invalid,metadata(),p->{fail("must not import anything");return null;}));
         Path target=root.resolve("keep.docx");Files.writeString(target,"keep original");
         var document=new WikiDocument(WikiDocument.CURRENT_FORMAT_VERSION,"test",List.of(new ImageBlock("a".repeat(64),"",ImageAlignment.LEFT,100)),metadata());

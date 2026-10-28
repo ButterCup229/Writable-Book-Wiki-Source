@@ -1,5 +1,7 @@
 package com.writablebookwiki.local;
 
+import com.writablebookwiki.local.storage.AtomicFiles;
+
 import java.io.IOException;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
@@ -42,14 +44,10 @@ public final class LocalLayoutStore {
     }
 
     public void save(Settings settings) throws IOException {
-        java.util.Objects.requireNonNull(settings);
-        Files.createDirectories(file.getParent());
-        Path temporary=Files.createTempFile(file.getParent(),"layout-",".tmp");
-        try {
-            Files.writeString(temporary,"# Local UI only; body paper width is fixed\ndirectory_visible=%s\nannotation_visible=%s\ndirectory_width=%d\nannotation_width=%d\n"
-                    .formatted(settings.directoryVisible(),settings.annotationVisible(),settings.directoryWidth(),settings.annotationWidth()),StandardCharsets.UTF_8);
-            try { Files.move(temporary,file,StandardCopyOption.REPLACE_EXISTING,StandardCopyOption.ATOMIC_MOVE); }
-            catch (AtomicMoveNotSupportedException unsupported) { Files.move(temporary,file,StandardCopyOption.REPLACE_EXISTING); }
-        } finally { Files.deleteIfExists(temporary); }
+        java.util.Objects.requireNonNull(settings, "settings");
+        AtomicFiles.writeUtf8(file,
+                "# Local UI only; body paper width is fixed\ndirectory_visible=%s\nannotation_visible=%s\ndirectory_width=%d\nannotation_width=%d\n"
+                        .formatted(settings.directoryVisible(), settings.annotationVisible(),
+                                settings.directoryWidth(), settings.annotationWidth()));
     }
 }

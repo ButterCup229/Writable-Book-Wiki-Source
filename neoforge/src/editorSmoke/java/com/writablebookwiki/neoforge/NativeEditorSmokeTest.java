@@ -2,6 +2,9 @@ package com.writablebookwiki.neoforge;
 
 import com.writablebookwiki.core.document.*;
 import com.writablebookwiki.local.*;
+import com.writablebookwiki.local.annotation.AnnotationWorkspace;
+import com.writablebookwiki.neoforge.client.editor.EditorCommand;
+import static com.writablebookwiki.neoforge.client.editor.EditorCommand.*;
 import com.mojang.blaze3d.platform.NativeImage;
 import java.lang.reflect.*;
 import java.nio.file.*;
@@ -51,9 +54,13 @@ public final class NativeEditorSmokeTest {
                 completedAt = ticks;
                 stage = 1;
             } else if (stage == 1 && ticks - completedAt > 20) {
+                NetworkSmokeChecks.run(NativeEditorSmokeTest::check, OUTPUT);
                 exerciseModIdentityAndStorage();
                 exerciseInputs();
                 exerciseTableDeletion();
+                exerciseUnifiedCommands();
+                exerciseLockModalIsolation();
+                exerciseAnnotationFailureRecovery();
                 exerciseClipboardImage();
                 exerciseRichEditing();
                 exerciseColorPalette();
@@ -71,31 +78,31 @@ public final class NativeEditorSmokeTest {
                 double bx = number(bounds, "bodyX"), by = number(bounds, "bodyTop");
                 // Right-click the selected range and type directly into the comment card.
                 screen.mouseClicked(bx + 10, by + 5, GLFW.GLFW_MOUSE_BUTTON_RIGHT);
-                check((boolean) field(screen, "commentComposerOpen"), "right click opens anchored comment");
+                check(((AnnotationWorkspace) field(screen, "annotationWorkspace")).editing(), "right click opens anchored comment");
                 for (char c : "Local comment: editable without Save".toCharArray()) screen.charTyped(c, 0);
                 WikiDocument bodyBeforeCommentUndo = editor.document();
                 screen.keyPressed(GLFW.GLFW_KEY_A, 0, GLFW.GLFW_MOD_CONTROL);
                 screen.charTyped('R', 0);
-                check(((PlainTextEditor) field(screen, "commentEditor")).text().equals("R"),
+                check(((AnnotationWorkspace) field(screen, "annotationWorkspace")).input().text().equals("R"),
                         "comment Ctrl+A selects and typing replaces");
                 screen.keyPressed(GLFW.GLFW_KEY_Z, 0, GLFW.GLFW_MOD_CONTROL);
-                check(((PlainTextEditor) field(screen, "commentEditor")).text().startsWith("Local comment"),
+                check(((AnnotationWorkspace) field(screen, "annotationWorkspace")).input().text().startsWith("Local comment"),
                         "comment undo restores only comment text");
                 check(editor.document() == bodyBeforeCommentUndo, "comment undo never edits shared body");
                 screen.keyPressed(GLFW.GLFW_KEY_ESCAPE, 0, 0);
-                check(((List<?>) field(screen, "annotations")).size() == 1, "comment auto-saved locally");
+                check(((AnnotationWorkspace) field(screen, "annotationWorkspace")).entries().size() == 1, "comment auto-saved locally");
                 var store = new LocalAnnotationStore(com.writablebookwiki.local.StoragePaths.dataRoot(FMLPaths.CONFIGDIR.get()).resolve("annotations"));
                 String originalHash = new WikiDocumentCodec().contentHash(editor.document());
                 var saved = store.loadVersionedTextAnnotations(SESSION.personalAnnotationKey(), originalHash);
                 check(saved.size() == 1, "comment readable from versioned disk store");
                 clickText(0, 0);
                 screen.charTyped('X', 0);
-                check(((List<LocalTextAnnotation>) field(screen, "annotations")).getFirst().startColumn() == 1,
+                check(((AnnotationWorkspace) field(screen, "annotationWorkspace")).entries().getFirst().startColumn() == 1,
                         "typing before comment rebases visible anchor");
                 check(store.loadVersionedTextAnnotations(SESSION.personalAnnotationKey(), originalHash).getFirst().startColumn() == 0,
                         "unsaved draft does not mutate saved-version comment");
                 screen.keyPressed(GLFW.GLFW_KEY_Z, 0, GLFW.GLFW_MOD_CONTROL);
-                check(((List<LocalTextAnnotation>) field(screen, "annotations")).getFirst().startColumn() == 0,
+                check(((AnnotationWorkspace) field(screen, "annotationWorkspace")).entries().getFirst().startColumn() == 0,
                         "body undo restores visible comment anchor");
                 completedAt = ticks;
                 stage = 3;
@@ -120,7 +127,7 @@ public final class NativeEditorSmokeTest {
                 capture("wiki-rich-reader.png");
                 screen.setDocumentMode(DocumentMode.EDIT);
                 clickText(1, 0);
-                action(0, 5);
+                action(0, TEXT_COLOR);
                 completedAt = ticks; stage = 8;
             } else if (stage == 8 && ticks-completedAt>20) {
                 capture("book-colors.png");
@@ -352,6 +359,138 @@ public final class NativeEditorSmokeTest {
         dragText(0, 0, 4);
     }
 
+    private static void exerciseUnifiedCommands() throws Exception {
+        EditorCommand[] commands = {BOLD, ITALIC, UNDERLINE, STRIKETHROUGH, SUPERSCRIPT, SUBSCRIPT,
+                HIDDEN, ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT, ALIGN_JUSTIFY};
+        int[] keys = {GLFW.GLFW_KEY_B, GLFW.GLFW_KEY_I, GLFW.GLFW_KEY_U, GLFW.GLFW_KEY_X,
+                GLFW.GLFW_KEY_EQUAL, GLFW.GLFW_KEY_EQUAL, GLFW.GLFW_KEY_H,
+                GLFW.GLFW_KEY_L, GLFW.GLFW_KEY_E, GLFW.GLFW_KEY_R, GLFW.GLFW_KEY_J};
+        int[] extra = {0, 0, 0, GLFW.GLFW_MOD_SHIFT, GLFW.GLFW_MOD_SHIFT, 0, GLFW.GLFW_MOD_SHIFT, 0, 0, 0, 0};
+        for (int i = 0; i < commands.length; i++) {
+            fresh(List.of(paragraph("same selection"))); dragText(0, 0, 4);
+            action(i < 7 ? 0 : 1, commands[i]);
+            WikiDocument buttonResult = editor.document();
+            fresh(List.of(paragraph("same selection"))); dragText(0, 0, 4);
+            screen.keyPressed(keys[i], 0, GLFW.GLFW_MOD_CONTROL | extra[i]);
+            check(editor.document().equals(buttonResult), commands[i] + " button and shortcut use identical edit");
+        }
+        fresh(List.of(new TableBlock(List.of(new TableRow(List.of(
+                new TableCell(List.of(new TextRun("cell text", TextStyle.DEFAULT))))))), paragraph("tail")));
+        Object b = call(screen, "bounds");
+        call(screen, "ensureLayout", new Class<?>[]{int.class}, number(b, "bodyWidth"));
+        Object table = ((List<?>) field(screen, "tableLayouts")).getFirst();
+        double x = number(b, "bodyX") + 7, y = number(b, "bodyTop") + number(table, "y") + 7;
+        screen.mouseClicked(x, y, 0); screen.mouseReleased(x, y, 0);
+        screen.keyPressed(GLFW.GLFW_KEY_A, 0, GLFW.GLFW_MOD_CONTROL);
+        Minecraft.getInstance().keyboardHandler.setClipboard("keep clipboard");
+        screen.keyPressed(GLFW.GLFW_KEY_X, 0, GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_SHIFT);
+        TableCell cell = ((TableBlock) editor.document().blocks().getFirst()).rows().getFirst().cells().getFirst();
+        check(cell.runs().stream().map(TextRun::text).reduce("", String::concat).equals("cell text"),
+                "table Ctrl+Shift+X keeps selected text instead of cutting");
+        check(cell.runs().stream().allMatch(r -> r.style().strikethrough()),
+                "table Ctrl+Shift+X applies strikethrough");
+        check(Minecraft.getInstance().keyboardHandler.getClipboard().equals("keep clipboard"),
+                "table strikethrough leaves system clipboard unchanged");
+        screen.keyPressed(GLFW.GLFW_KEY_Z, 0, GLFW.GLFW_MOD_CONTROL);
+        check(((TableBlock) editor.document().blocks().getFirst()).rows().getFirst().cells().getFirst()
+                .runs().stream().noneMatch(r -> r.style().strikethrough()), "table format participates in shared undo");
+        action(0, STRIKETHROUGH);
+        check(((TableBlock) editor.document().blocks().getFirst()).rows().getFirst().cells().getFirst()
+                .runs().stream().allMatch(r -> r.style().strikethrough()), "table button retains cell selection");
+
+        PendingSaveSession pending = new PendingSaveSession();
+        freshSaveSession(pending, new int[]{0});
+        b = call(screen, "bounds");
+        screen.mouseClicked(number(b, "bodyX") + 20, number(b, "headerY") + 6, 0);
+        screen.keyPressed(GLFW.GLFW_KEY_A, 0, GLFW.GLFW_MOD_CONTROL);
+        typeText("Renamed with Ctrl+S");
+        screen.keyPressed(GLFW.GLFW_KEY_S, 0, GLFW.GLFW_MOD_CONTROL);
+        check(pending.snapshots.size() == 1 && pending.snapshots.getFirst().title().equals("Renamed with Ctrl+S"),
+                "title Ctrl+S commits current title and requests a confirmed save");
+        check(!(boolean) field(screen, "editingTitle"), "title Ctrl+S returns focus to document");
+        pending.replies.getFirst().complete(new DocumentSession.SaveConfirmation(true, "saved"));
+    }
+
+    private static void exerciseLockModalIsolation() throws Exception {
+        DocumentSession lockable = new DocumentSession() {
+            public boolean canEdit() { return true; }
+            public boolean canChangeLock() { return true; }
+            public String save(WikiDocument doc) { return "saved"; }
+            public String personalAnnotationKey() { return "modal-smoke-" + ProcessHandle.current().pid(); }
+        };
+        List<Block> content = new ArrayList<>();
+        for (int i = 0; i < 60; i++) content.add(paragraph("Modal test line " + i));
+        editor = new WikiDocumentEditor(document(content));
+        screen = new NativeWikiScreen(editor, lockable, DocumentMode.EDIT, 0, () -> {});
+        Minecraft.getInstance().setScreen(screen);
+        dragText(0, 0, 5);
+        Object b = call(screen, "bounds");
+        screen.mouseClicked(number(b, "lockButtonX") + 4, number(b, "headerY") + 5, 0);
+        check((boolean) field(screen, "lockConfirmationOpen"), "lock click opens confirmation");
+        WikiDocument before = editor.document();
+        int scroll = (int) field(screen, "bodyScroll");
+        screen.charTyped('X', 0);
+        screen.keyPressed(GLFW.GLFW_KEY_BACKSPACE, 0, 0);
+        screen.keyPressed(GLFW.GLFW_KEY_B, 0, GLFW.GLFW_MOD_CONTROL);
+        screen.mouseClicked(number(b, "bodyX") + 8, number(b, "bodyTop") + 5, GLFW.GLFW_MOUSE_BUTTON_RIGHT);
+        screen.mouseScrolled(number(b, "bodyX") + 8, number(b, "bodyTop") + 5, 0, -8);
+        check(editor.document() == before, "lock modal blocks typing deletion and format shortcuts");
+        check(!((AnnotationWorkspace) field(screen, "annotationWorkspace")).editing(),
+                "lock modal blocks right-click annotation creation");
+        check((int) field(screen, "bodyScroll") == scroll, "lock modal blocks scrolling behind dialog");
+        screen.keyPressed(GLFW.GLFW_KEY_ESCAPE, 0, 0);
+        check(!(boolean) field(screen, "lockConfirmationOpen") && Minecraft.getInstance().screen == screen,
+                "lock modal Escape dismisses only the child dialog");
+    }
+
+    private static void exerciseAnnotationFailureRecovery() throws Exception {
+        String namespace = "annotation-failure-" + ProcessHandle.current().pid();
+        DocumentSession localOnly = new DocumentSession() {
+            public boolean canEdit() { return true; }
+            public String save(WikiDocument doc) { throw new AssertionError("Comments must not save shared body"); }
+            public String personalAnnotationKey() { return namespace; }
+        };
+        editor = new WikiDocumentEditor(document(List.of(paragraph("annotation failure test"))));
+        screen = new NativeWikiScreen(editor, localOnly, DocumentMode.READ, 0, () -> {});
+        Minecraft.getInstance().setScreen(screen);
+        dragText(0, 0, 5);
+        Object b = call(screen, "bounds");
+        screen.mouseClicked(number(b, "bodyX") + 10, number(b, "bodyTop") + 5, GLFW.GLFW_MOUSE_BUTTON_RIGHT);
+        AnnotationWorkspace notes = (AnnotationWorkspace) field(screen, "annotationWorkspace");
+        Path directory = StoragePaths.dataRoot(FMLPaths.CONFIGDIR.get()).resolve("annotations");
+        String key = LocalAnnotationStore.versionKey(namespace, new WikiDocumentCodec().contentHash(editor.document()));
+        Path file = directory.resolve(key + ".comments");
+        // This isolated smoke namespace is created by the constructor above; force a real file-write failure.
+        Files.delete(file);
+        Files.createDirectory(file);
+        WikiDocument original = editor.document();
+        try {
+            typeText("draft");
+            check(notes.editing() && notes.input().text().equals("draft") && notes.draftChanged(),
+                    "failed comment autosave retains complete typed draft");
+            clickText(0, 12);
+            check(notes.editing() && notes.input().text().equals("draft"),
+                    "failed focus switch keeps annotation composer open");
+            screen.mouseClicked(number(b, "bodyX") + 15, number(b, "bodyTop") + 5, GLFW.GLFW_MOUSE_BUTTON_RIGHT);
+            check(notes.input().text().equals("draft"), "failed right-click focus switch retains draft");
+            screen.onClose();
+            check(Minecraft.getInstance().screen == screen && notes.editing(),
+                    "failed annotation close keeps editor available for retry");
+        } finally {
+            Files.delete(file);
+        }
+        clickText(0, 12);
+        check(!notes.editing() && new LocalAnnotationStore(directory).loadTextAnnotations(key)
+                .getFirst().comment().equals("draft"), "restored storage retries draft and permits focus switch");
+        check(editor.document() == original, "reader comments and their retry never mutate shared body");
+        call(screen, "beginExistingCommentEditing", new Class<?>[]{int.class}, 0);
+        screen.keyPressed(GLFW.GLFW_KEY_A, 0, GLFW.GLFW_MOD_CONTROL);
+        Minecraft.getInstance().keyboardHandler.setClipboard("first\r\n\r\nlast");
+        screen.keyPressed(GLFW.GLFW_KEY_V, 0, GLFW.GLFW_MOD_CONTROL);
+        check(notes.input().text().equals("first\n\nlast"), "comment paste preserves blank lines while normalizing CRLF");
+        screen.keyPressed(GLFW.GLFW_KEY_ESCAPE, 0, 0);
+    }
+
     private static void exerciseTableDeletion() throws Exception {
         for (int action = 0; action < 3; action++) {
             Object bounds = call(screen, "bounds");
@@ -373,6 +512,7 @@ public final class NativeEditorSmokeTest {
     }
 
     private static void exerciseClipboardImage() throws Exception {
+        fresh(List.of(paragraph("clipboard image insertion")));
         String script = """
                 $ErrorActionPreference = 'Stop'
                 [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -487,12 +627,12 @@ public final class NativeEditorSmokeTest {
         editor=new WikiDocumentEditor(document(blocks));screen=new NativeWikiScreen(editor,SESSION,DocumentMode.EDIT,0,()->{});
         Minecraft.getInstance().setScreen(screen);
     }
-    private static void action(int tab, int action) throws Exception {
+    private static void action(int tab, EditorCommand action) throws Exception {
         Object bounds=call(screen,"bounds");
         screen.mouseClicked(number(bounds,"modeX")+tab*45+8,number(bounds,"toolbarY")+6,0);
         bounds=call(screen,"bounds");
         for(Object button:(List<?>)call(screen,"toolbarButtons",new Class<?>[]{bounds.getClass()},bounds)) {
-            if(number(button,"action")==action) {
+            if(call(button,"command")==action) {
                 screen.mouseClicked(number(button,"x")+4,number(button,"y")+6,0);screen.mouseReleased(number(button,"x")+4,number(button,"y")+6,0);return;
             }
         }
@@ -500,23 +640,23 @@ public final class NativeEditorSmokeTest {
     }
     private static void exerciseRichEditing() throws Exception {
         fresh(List.of(paragraph("abcd")));dragText(0,0,4);
-        action(0,12);action(0,14);action(0,15);action(0,11);action(0,0);
+        action(0, SUPERSCRIPT);action(0, HIDDEN);action(0, INLINE_CODE);action(0, UNDERLINE);action(0, BOLD);
         TextStyle style=editor.document().blocks().getFirst().runs().getFirst().style();
         check(style.script()==1&&style.hidden()&&style.code()&&style.underline()&&style.bold(),"ribbon formats compose without losing inline attributes");
-        action(1,17);check(((RichTextBlock)editor.document().blocks().getFirst()).alignment()==RichTextBlock.Alignment.CENTER,"center alignment changes paragraph");
+        action(1, ALIGN_CENTER);check(((RichTextBlock)editor.document().blocks().getFirst()).alignment()==RichTextBlock.Alignment.CENTER,"center alignment changes paragraph");
         clickText(0,2);check((int)field(screen,"caretColumn")==2,"centered text caret uses painted positions");
-        action(1,20);screen.keyPressed(GLFW.GLFW_KEY_END,0,0);screen.keyPressed(GLFW.GLFW_KEY_ENTER,0,0);
+        action(1, BULLET);screen.keyPressed(GLFW.GLFW_KEY_END,0,0);screen.keyPressed(GLFW.GLFW_KEY_ENTER,0,0);
         check(editor.document().blocks().get(1) instanceof RichTextBlock r&&r.kind()==RichTextBlock.Kind.BULLET,"Enter continues bullet list");
         screen.keyPressed(GLFW.GLFW_KEY_ENTER,0,0);
         check(editor.document().blocks().get(1) instanceof RichTextBlock r&&r.kind()==RichTextBlock.Kind.NORMAL,"empty list Enter exits list");
-        fresh(List.of(paragraph("task")));clickText(0,0);action(1,23);
+        fresh(List.of(paragraph("task")));clickText(0,0);action(1, TASK);
         Object bounds=call(screen,"bounds");screen.mouseClicked(number(bounds,"bodyX")+5,number(bounds,"bodyTop")+7,0);
         check(((RichTextBlock)editor.document().blocks().getFirst()).checked(),"task checkbox toggles in edit mode");
         screen.keyPressed(GLFW.GLFW_KEY_Z,0,GLFW.GLFW_MOD_CONTROL);
         check(!((RichTextBlock)editor.document().blocks().getFirst()).checked(),"task checkbox supports undo");
         screen.setDocumentMode(DocumentMode.READ);bounds=call(screen,"bounds");screen.mouseClicked(number(bounds,"bodyX")+5,number(bounds,"bodyTop")+7,0);
         check(!((RichTextBlock)editor.document().blocks().getFirst()).checked(),"reader task click does not mutate shared document");
-        fresh(List.of(paragraph("beforeafter")));clickText(0,6);action(2,30);
+        fresh(List.of(paragraph("beforeafter")));clickText(0,6);action(2, RULE);
         check(editor.document().blocks().get(1) instanceof HorizontalRule,"horizontal rule is a structural block");
         screen.keyPressed(GLFW.GLFW_KEY_BACKSPACE,0,0);check(editor.document().blocks().size()==2,"backspace after rule removes only the rule");
         fresh(List.of(paragraph("open link")));dragText(0,0,4);screen.keyPressed(GLFW.GLFW_KEY_K,0,GLFW.GLFW_MOD_CONTROL);
@@ -559,7 +699,7 @@ public final class NativeEditorSmokeTest {
         check(number(bounds, "bottom") - number(bounds, "top") <= 380 && number(bounds, "top") >= 40,
                 "book workspace leaves visible world margins at normal size");
         check(number(bounds, "bodyWidth") == 310, "book styling preserves default text width");
-        action(0, 5);
+        action(0, TEXT_COLOR);
         check(((int[]) field(screen, "COLOR_PRESETS")).length == 60, "palette contains 60 preset colours");
         check(number(call(screen, "bounds"), "bodyTop") == bodyTop, "palette does not push document down");
         clickColor(23);
@@ -568,7 +708,7 @@ public final class NativeEditorSmokeTest {
         screen.keyPressed(GLFW.GLFW_KEY_Z, 0, GLFW.GLFW_MOD_CONTROL);
         check(editor.document().blocks().getFirst().runs().stream().allMatch(r -> r.style().rgbColor() == TextStyle.DEFAULT.rgbColor()),
                 "preset colour change participates in undo");
-        clickText(0, 4); action(0, 5);
+        clickText(0, 4); action(0, TEXT_COLOR);
         var input = (net.minecraft.client.gui.components.EditBox) field(screen, "colorInput");
         for (char c : "#0A31FF".toCharArray()) screen.charTyped(c, 0);
         check(input.getValue().equals("#0A31FF"), "typing custom colour replaces selected hex field");
@@ -576,16 +716,16 @@ public final class NativeEditorSmokeTest {
         check(editor.document().blocks().getFirst().runs().stream().anyMatch(r -> r.text().equals("Z") && r.style().rgbColor() == 0x0A31FF),
                 "custom hex colour applies to subsequent typing");
         WikiDocument before = editor.document();
-        action(0, 5); ((net.minecraft.client.gui.components.EditBox) field(screen, "colorInput")).setValue("#oops");
+        action(0, TEXT_COLOR); ((net.minecraft.client.gui.components.EditBox) field(screen, "colorInput")).setValue("#oops");
         screen.keyPressed(GLFW.GLFW_KEY_ENTER, 0, 0);
         check((boolean) call(screen, "isColorMenu") && editor.document().equals(before), "invalid colour keeps popup open without editing text");
         screen.keyPressed(GLFW.GLFW_KEY_ESCAPE, 0, 0);
         check(!(boolean) call(screen, "isColorMenu") && Minecraft.getInstance().screen == screen, "Escape dismisses palette without closing book");
-        action(0, 5); screen.setDocumentMode(DocumentMode.READ);
+        action(0, TEXT_COLOR); screen.setDocumentMode(DocumentMode.READ);
         check(!(boolean) call(screen, "isColorMenu") && editor.document().equals(before),
                 "forced reader mode dismisses editing palette without mutating text");
         screen.setDocumentMode(DocumentMode.EDIT);
-        action(3, 36); clickColor(49);
+        action(3, PAPER_COLOR); clickColor(49);
         check((int) field(screen, "paperColorRgb") == 0xFFF1E6 && editor.document().equals(before),
                 "paper colour is independent of text and shared document hash");
         var appearance = new LocalAppearanceStore(com.writablebookwiki.local.StoragePaths.dataRoot(FMLPaths.CONFIGDIR.get()).resolve("appearance.properties"));
@@ -594,14 +734,14 @@ public final class NativeEditorSmokeTest {
         check((int) field(screen, "paperColorRgb") == 0xFFF1E6, "reader uses same selected paper colour");
         fresh(List.of(paragraph("new book")));
         check((int) field(screen, "paperColorRgb") == 0xFFF1E6, "paper preference survives reopening a book");
-        screen.resize(Minecraft.getInstance(), 360, 240); clickText(0, 0); action(0, 5);
+        screen.resize(Minecraft.getInstance(), 360, 240); clickText(0, 0); action(0, TEXT_COLOR);
         bounds = call(screen, "bounds");
         Object popup = call(screen, "colorPaletteBounds", new Class<?>[]{bounds.getClass()}, bounds);
         check(number(popup, "x") + number(popup, "width") <= number(bounds, "right")
                         && number(popup, "y") + number(popup, "height") <= number(bounds, "bottom"),
                 "full palette fits narrow game viewport");
         screen.keyPressed(GLFW.GLFW_KEY_ESCAPE, 0, 0);
-        action(3, 36);
+        action(3, PAPER_COLOR);
         bounds = call(screen, "bounds"); popup = call(screen, "colorPaletteBounds", new Class<?>[]{bounds.getClass()}, bounds);
         screen.mouseClicked(number(popup, "x") + 140, number(popup, "inputY") + 6, 0);
         check(appearance.loadPaperColor() == LocalAppearanceStore.DEFAULT_PAPER_RGB, "default button restores paper preference");
@@ -609,7 +749,7 @@ public final class NativeEditorSmokeTest {
         bounds = call(screen, "bounds");
         screen.mouseClicked(number(bounds, "bodyX") + 7, number(bounds, "bodyTop") + 7, 0);
         screen.mouseReleased(number(bounds, "bodyX") + 7, number(bounds, "bodyTop") + 7, 0);
-        screen.keyPressed(GLFW.GLFW_KEY_A, 0, GLFW.GLFW_MOD_CONTROL); action(0, 5); clickColor(31);
+        screen.keyPressed(GLFW.GLFW_KEY_A, 0, GLFW.GLFW_MOD_CONTROL); action(0, TEXT_COLOR); clickColor(31);
         TableBlock table = (TableBlock) editor.document().blocks().getFirst();
         check(table.rows().getFirst().cells().getFirst().runs().stream().allMatch(r -> r.style().rgbColor() == 0x1F5E99),
                 "palette formats selected table-cell text");
@@ -636,7 +776,7 @@ public final class NativeEditorSmokeTest {
     private static void exerciseExitSave() throws Exception {
         PendingSaveSession pending = new PendingSaveSession(); int[] closed = {0};
         freshSaveSession(pending, closed); clickText(0, 4); screen.charTyped('A', 0);
-        action(0, 5); screen.keyPressed(GLFW.GLFW_KEY_ESCAPE, 0, 0);
+        action(0, TEXT_COLOR); screen.keyPressed(GLFW.GLFW_KEY_ESCAPE, 0, 0);
         check(pending.snapshots.isEmpty() && Minecraft.getInstance().screen == screen, "child Escape does not save or close editor");
         call(screen,"showDocxReport",new Class<?>[]{String.class,String.class,List.class},"导出说明","路径与格式说明",List.of("说明"));
         check(closed[0] == 0 && Minecraft.getInstance().screen instanceof DocxReportScreen,
@@ -701,7 +841,7 @@ public final class NativeEditorSmokeTest {
         for(int tab=0;tab<4;tab++) {
             screen.mouseClicked(number(b,"modeX")+tab*45+8,number(b,"toolbarY")+6,0);
             for(Object button:(List<?>)call(screen,"toolbarButtons",new Class<?>[]{b.getClass()},b))
-                if(number(button,"action")==10 || number(button,"action")==27)throw new AssertionError("removed toolbar action visible");
+                if(call(button,"command")==SORT || call(button,"command")==CODE_BLOCK)throw new AssertionError("removed toolbar action visible");
         }
         check(true,"sort and code-block toolbar buttons removed");
         for(RichTextBlock.Kind kind:List.of(RichTextBlock.Kind.QUOTE,RichTextBlock.Kind.INFO,RichTextBlock.Kind.WARNING,RichTextBlock.Kind.STEP,RichTextBlock.Kind.TASK,RichTextBlock.Kind.QUOTE_TASK)) {
@@ -755,12 +895,12 @@ public final class NativeEditorSmokeTest {
         check(!NativeRichClipboard.copy(ignored->{},()->"unchanged","not written",null),
                 "failed clipboard write is reported instead of allowing destructive cut");
 
-        fresh(List.of(rich(RichTextBlock.Kind.QUOTE,"intro\ntask\nafter")));clickText(0,8);action(1,23);
+        fresh(List.of(rich(RichTextBlock.Kind.QUOTE,"intro\ntask\nafter")));clickText(0,8);action(1, TASK);
         check(editor.document().blocks().size()==3 && ((RichTextBlock)editor.document().blocks().get(1)).isTask()
                 && ((RichTextBlock)editor.document().blocks().get(1)).isQuote(),"task toolbar adds current line inside quote without replacing surrounding prose");
-        check((boolean)call(screen,"toolActive",new Class<?>[]{int.class},22) && (boolean)call(screen,"toolActive",new Class<?>[]{int.class},23),
+        check((boolean)call(screen,"toolActive",new Class<?>[]{EditorCommand.class},QUOTE) && (boolean)call(screen,"toolActive",new Class<?>[]{EditorCommand.class},TASK),
                 "quote and task toolbar states can both be active");
-        action(1,23);
+        action(1, TASK);
         check(((RichTextBlock)editor.document().blocks().get(1)).kind()==RichTextBlock.Kind.QUOTE,"removing task keeps quote frame");
 
         for(RichTextBlock.Kind kind:List.of(RichTextBlock.Kind.TASK,RichTextBlock.Kind.QUOTE_TASK))
@@ -843,7 +983,7 @@ public final class NativeEditorSmokeTest {
             check(editLines.equals(field(screen,"layoutLines")), label+" read and edit share identical text layout");
             if (item.frame() != null) check(((List<?>)field(screen,"frameLayouts")).size() == 1,label+" all items remain in one continuous frame");
         }
-        for (var frameKind : BlockFrame.Kind.values()) for (int action : List.of(20,21)) {
+        for (var frameKind : BlockFrame.Kind.values()) for (EditorCommand action : List.of(BULLET, NUMBERED)) {
             fresh(List.of(rich(RichTextBlock.Kind.valueOf(frameKind.name()),"intro\nitem\nafter")));
             clickText(0,8); action(1,action);
             check(editor.document().blocks().size()==3 && ((RichTextBlock)editor.document().blocks().get(1)).isList()
@@ -917,13 +1057,13 @@ public final class NativeEditorSmokeTest {
         var imported = SESSION.importLocalImage(OUTPUT.resolve("grid.png"));
         for (BlockFrame.Kind kind : BlockFrame.Kind.values()) {
             fresh(List.of(rich(RichTextBlock.Kind.valueOf(kind.name()), "intro\ntask\nafter")));
-            clickText(0,8); action(1,23);
+            clickText(0,8); action(1, TASK);
             Object line = frameTaskLine(1), b = call(screen,"bounds");
             Object box = call(screen,"taskBox",new Class<?>[]{line.getClass()},line);
             int inset = kind == BlockFrame.Kind.QUOTE ? 8 : 14;
             check(number(box,"x") == inset && number(line,"indent") == inset + 14, kind+" task box aligns to frame content edge, text follows with 4-unit gap");
             check(((List<?>)field(screen,"frameLayouts")).size() == 1, kind+" task and surrounding prose share one continuous frame");
-            check((boolean)call(screen,"toolActive",new Class<?>[]{int.class},kind == BlockFrame.Kind.QUOTE ? 22 : kind == BlockFrame.Kind.INFO ? 24 : 25),
+            check((boolean)call(screen,"toolActive",new Class<?>[]{EditorCommand.class},kind == BlockFrame.Kind.QUOTE ? QUOTE : kind == BlockFrame.Kind.INFO ? INFO : WARNING),
                     kind+" parent toolbar state survives task insertion");
             double tx=number(b,"bodyX")+number(box,"x")+5, ty=number(b,"bodyTop")+number(box,"y")+5;
             screen.mouseClicked(tx,ty,0);screen.mouseReleased(tx,ty,0);

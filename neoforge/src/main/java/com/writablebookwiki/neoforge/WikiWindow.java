@@ -42,7 +42,7 @@ final class WikiWindow {
 
     /** Opens a world-backed document without touching the local F8 preview file. */
     static void openDocument(WikiDocument document, DocumentSession session) {
-        WikiWindow candidate = new WikiWindow(new WikiDocumentEditor(document), session, DocumentMode.READ, 0);
+        WikiWindow candidate = new WikiWindow(new WikiDocumentEditor(document), session, DocumentMode.READ, Math.max(0, session.sharedPage()));
         replaceActive(candidate);
     }
 
@@ -76,6 +76,17 @@ final class WikiWindow {
         return minecraft.screen == gameScreen;
     }
 
+    static void tick() {
+        WikiWindow window = activeWindow;
+        if (window == null || !window.isOpen()) return;
+        if (!window.session.isValid()) {
+            Minecraft.getInstance().setScreen(null);
+            return;
+        }
+        int shared = window.session.sharedPage();
+        if (shared >= 0 && shared != window.gameScreen.pageIndex()) window.gameScreen.showPage(shared);
+    }
+
     private boolean isOpen() {
         return Minecraft.getInstance().screen == gameScreen;
     }
@@ -93,9 +104,11 @@ final class WikiWindow {
 
     private void onGamePageChanged(int changedPage) {
         pageIndex = clampPage(changedPage);
+        session.changePage(pageIndex);
     }
 
     private void onGameScreenClosed() {
+        session.close();
         if (activeWindow == this) {
             activeWindow = null;
         }

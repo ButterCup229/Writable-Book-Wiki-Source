@@ -1,0 +1,477 @@
+PASS
+protocol v1 frozen bytes: 0 writablebookwiki:book_open_request
+protocol round trip consumes exact payload: 0
+protocol v1 frozen bytes: 1 writablebookwiki:book_open_header
+protocol round trip consumes exact payload: 1
+protocol v1 frozen bytes: 2 writablebookwiki:book_open_chunk
+protocol round trip consumes exact payload: 2
+protocol v1 frozen bytes: 3 writablebookwiki:book_open_failure
+protocol round trip consumes exact payload: 3
+protocol v1 frozen bytes: 4 writablebookwiki:image_upload_header
+protocol round trip consumes exact payload: 4
+protocol v1 frozen bytes: 5 writablebookwiki:image_upload_chunk
+protocol round trip consumes exact payload: 5
+protocol v1 frozen bytes: 6 writablebookwiki:image_open_header
+protocol round trip consumes exact payload: 6
+protocol v1 frozen bytes: 7 writablebookwiki:image_open_chunk
+protocol round trip consumes exact payload: 7
+protocol v1 frozen bytes: 8 writablebookwiki:image_upload_result
+protocol round trip consumes exact payload: 8
+protocol v1 frozen bytes: 9 writablebookwiki:book_save_header
+protocol round trip consumes exact payload: 9
+protocol v1 frozen bytes: 10 writablebookwiki:book_lock_request
+protocol round trip consumes exact payload: 10
+protocol v1 frozen bytes: 11 writablebookwiki:book_save_chunk
+protocol round trip consumes exact payload: 11
+protocol v1 frozen bytes: 12 writablebookwiki:book_save_success
+protocol round trip consumes exact payload: 12
+protocol v1 frozen bytes: 13 writablebookwiki:book_save_failure
+protocol round trip consumes exact payload: 13
+protocol v1 frozen bytes: 14 writablebookwiki:book_open_request
+protocol round trip consumes exact payload: 14
+protocol v1 frozen bytes: 15 writablebookwiki:book_open_header
+protocol round trip consumes exact payload: 15
+protocol v1 frozen bytes: 16 writablebookwiki:book_save_success
+protocol round trip consumes exact payload: 16
+protocol v1 frozen bytes: 17 writablebookwiki:book_save_success
+protocol round trip consumes exact payload: 17
+packet bytes are immutable snapshots
+wire header rejects inconsistent length/count
+1 KiB/s does not spend credit early
+rate below packet size still makes progress
+image header precedes paced streaming chunks
+closing queued delivery drains and is idempotent
+queue close releases its opened image file
+send failure drains queue and closes active stream
+logout clears only the departed player's upload
+logout discards partial asset file
+server stop drains all transfer state
+client disconnect invalidates open reply and buffer
+disconnect terminates pending save and revokes stale session actions
+stale session cannot send lock updates
+unmatched save reply cannot advance pointer
+matching acknowledgement advances session pointer
+late reply cannot mutate a disconnected session
+new mod does not register an old-development item alias
+books serialize under writablebookwiki namespace
+item translation key uses the current namespace
+in-game item name is Writable Book Wiki
+new mod does not interpret old-development custom data
+current ItemStack NBT round trip preserves book ID, hash and lock
+pointer write preserves unrelated custom data
+new mod does not adopt an old-development world index
+current world index is saved without altering unrelated files
+current world index survives save and reopen
+current world document round trip preserves content and pointer
+world documents are stored in the documented directory
+collapsed bold applies to new typing
+Enter replaces selected paragraph text
+Left crosses paragraph boundary
+Down follows visual lines
+undo keeps earlier Enter as separate action
+mouse drag selection replaced exactly
+Enter inserts newline inside table cell
+table selection uses shared italic command
+Tab at table end appends row
+table row append participates in shared undo
+click from table returns input focus to prose
+table context menu opens 0
+table deletion action removes final row/column/table 0
+table deletion undo restores content 0
+table context menu opens 1
+table deletion action removes final row/column/table 1
+table deletion undo restores content 1
+table context menu opens 2
+table deletion action removes final row/column/table 2
+table deletion undo restores content 2
+clipboard fixture ready: READY
+system clipboard bitmap pastes through Ctrl+V
+clipboard image undo restores paragraph
+clipboard fixture ready: READY
+text clipboard still pastes normally
+system clipboard restored after test; exit=0
+ribbon formats compose without losing inline attributes
+center alignment changes paragraph
+centered text caret uses painted positions
+Enter continues bullet list
+empty list Enter exits list
+task checkbox toggles in edit mode
+task checkbox supports undo
+reader task click does not mutate shared document
+horizontal rule is a structural block
+backspace after rule removes only the rule
+Ctrl+K dialog applies hyperlink to selected text
+reader click reveals one spoiler run
+reader click conceals revealed spoiler
+command text remains editable without executing
+command click requires an actual player connection
+all ribbon tabs fit both narrow and normal GUI sizes
+book workspace leaves visible world margins at normal size
+book styling preserves default text width
+palette contains 60 preset colours
+palette does not push document down
+preset applies exactly to selected text without losing selection
+preset colour change participates in undo
+typing custom colour replaces selected hex field
+custom hex colour applies to subsequent typing
+invalid colour keeps popup open without editing text
+Escape dismisses palette without closing book
+forced reader mode dismisses editing palette without mutating text
+paper colour is independent of text and shared document hash
+paper preference is saved only in local configuration
+reader uses same selected paper colour
+paper preference survives reopening a book
+full palette fits narrow game viewport
+default button restores paper preference
+palette formats selected table-cell text
+child Escape does not save or close editor
+export report does not end document session
+return from export report preserves draft without triggering exit-save
+root Escape submits save and waits for confirmation
+pending exit does not duplicate save or accept unsaved typing
+failed save retains draft and restores editing
+Escape retries failed save
+confirmed save closes document exactly once
+unchanged document exits without rewriting or forking
+exit saves edits made while earlier manual save was pending
+latest confirmed draft closes after queued exit-save
+Escape through real preview session writes a reloadable document
+intervening prose restarts step numbering, consecutive steps continue
+sort and code-block toolbar buttons removed
+Enter keeps multiline text in same QUOTE container
+Shift Enter starts next QUOTE block
+fold shrinks view without changing QUOTE text
+clicking collapsed QUOTE text does not expand
+same arrow expands QUOTE in editor
+reader text click leaves QUOTE collapsed
+reader unfolds complete QUOTE text
+Enter keeps multiline text in same INFO container
+Shift Enter starts next INFO block
+fold shrinks view without changing INFO text
+clicking collapsed INFO text does not expand
+same arrow expands INFO in editor
+reader text click leaves INFO collapsed
+reader unfolds complete INFO text
+Enter keeps multiline text in same WARNING container
+Shift Enter starts next WARNING block
+fold shrinks view without changing WARNING text
+clicking collapsed WARNING text does not expand
+same arrow expands WARNING in editor
+reader text click leaves WARNING collapsed
+reader unfolds complete WARNING text
+Enter keeps multiline text in same STEP container
+Shift Enter starts next STEP block
+fold shrinks view without changing STEP text
+clicking collapsed STEP text does not expand
+same arrow expands STEP in editor
+reader text click leaves STEP collapsed
+reader unfolds complete STEP text
+Enter keeps multiline text in same TASK container
+Shift Enter starts next TASK block
+multiline TASK has no fold control
+Enter keeps multiline text in same QUOTE_TASK container
+Shift Enter starts next QUOTE_TASK block
+multiline QUOTE_TASK has no fold control
+Windows clipboard ownership retains rich whole-line copy
+Ctrl V keeps full quote line presentation and run styles
+rich paste is one undo step
+partial quote text does not copy quote frame
+partial text retains inline formatting
+rich copy works from reader across reopened screens
+external same-text copy cannot reuse stale quote formatting
+failed clipboard write is reported instead of allowing destructive cut
+task toolbar adds current line inside quote without replacing surrounding prose
+quote and task toolbar states can both be active
+removing task keeps quote frame
+checkbox bottom-right hit matches visible box TASK LEFT
+outside checkbox does not toggle TASK LEFT
+reader cannot mutate checkbox TASK LEFT
+checkbox bottom-right hit matches visible box TASK CENTER
+outside checkbox does not toggle TASK CENTER
+reader cannot mutate checkbox TASK CENTER
+checkbox bottom-right hit matches visible box TASK RIGHT
+outside checkbox does not toggle TASK RIGHT
+reader cannot mutate checkbox TASK RIGHT
+checkbox bottom-right hit matches visible box QUOTE_TASK LEFT
+outside checkbox does not toggle QUOTE_TASK LEFT
+reader cannot mutate checkbox QUOTE_TASK LEFT
+checkbox bottom-right hit matches visible box QUOTE_TASK CENTER
+outside checkbox does not toggle QUOTE_TASK CENTER
+reader cannot mutate checkbox QUOTE_TASK CENTER
+checkbox bottom-right hit matches visible box QUOTE_TASK RIGHT
+outside checkbox does not toggle QUOTE_TASK RIGHT
+reader cannot mutate checkbox QUOTE_TASK RIGHT
+info and warning reserve compact 14-unit icon gutters
+body text width is fixed to 310 units
+directory and body group is centred
+resizing directory keeps fixed body width
+resized group recentres without stretching body
+adding annotation creates side paper without reflow
+all three modules form a centred group
+annotation width changes independently of directory and body widths
+centred modules remain inside outer UI
+hiding sidebar does not reflow document
+body alone is centred
+Esc exit and reopen restore sidebar visibility and width from disk
+annotation visibility and width are restored independently
+UI preferences never mutate document or hash
+scrollbar thumb drags exactly to page bottom
+thumb bottom indicates content bottom exactly
+scrollbar thumb drags exactly to page top
+reader scrollbar track jumps without changing content
+tiny window clips viewport without changing text wrapping
+short page has no unnecessary scrollbar
+corner begins resize false/false
+corner outward drag grows false/false
+opposite corner stays fixed false/false
+resize does not jump on release
+corner begins resize false/true
+corner outward drag grows false/true
+opposite corner stays fixed false/true
+resize does not jump on release
+corner begins resize true/false
+corner outward drag grows true/false
+opposite corner stays fixed true/false
+resize does not jump on release
+corner begins resize true/true
+corner outward drag grows true/true
+opposite corner stays fixed true/true
+resize does not jump on release
+picture drags on first press outside its original line
+behind-text picture does not steal prose click
+behind-text overlap exercised
+mode switch retains the same screen instance
+right click opens anchored comment
+comment Ctrl+A selects and typing replaces
+comment undo restores only comment text
+comment undo never edits shared body
+comment auto-saved locally
+comment readable from versioned disk store
+typing before comment rebases visible anchor
+unsaved draft does not mutate saved-version comment
+body undo restores visible comment anchor
+QUOTE task box aligns to frame content edge, text follows with 4-unit gap
+QUOTE task and surrounding prose share one continuous frame
+QUOTE parent toolbar state survives task insertion
+QUOTE visible nested checkbox is clickable
+QUOTE Enter stays in task and preserves surrounding frame
+QUOTE Shift Enter creates unchecked task in same frame
+QUOTE image insertion keeps container and surrounding text
+QUOTE table respects both frame insets
+QUOTE editing table preserves frame
+QUOTE table hit test uses the same inset as drawing
+QUOTE click from table returns to trailing frame prose
+QUOTE picture is contained by continuous background
+QUOTE mixed container roundtrips stored document
+QUOTE reader and editor use identical mixed-frame layout
+QUOTE frame arrow folds images and tables together
+QUOTE frame arrow expands all objects without modifying content
+QUOTE inline to cover preserves visible position relative to frame
+QUOTE frame picture drag commits without coordinate jump
+QUOTE frame image corner resizes inside content bounds
+QUOTE wrapped picture reserves checkbox gutter instead of covering task control
+QUOTE Shift Enter on trailing blank exits frame without removing its contents
+INFO task box aligns to frame content edge, text follows with 4-unit gap
+INFO task and surrounding prose share one continuous frame
+INFO parent toolbar state survives task insertion
+INFO visible nested checkbox is clickable
+INFO Enter stays in task and preserves surrounding frame
+INFO Shift Enter creates unchecked task in same frame
+INFO image insertion keeps container and surrounding text
+INFO table respects both frame insets
+INFO editing table preserves frame
+INFO table hit test uses the same inset as drawing
+INFO click from table returns to trailing frame prose
+INFO picture is contained by continuous background
+INFO mixed container roundtrips stored document
+INFO reader and editor use identical mixed-frame layout
+INFO frame arrow folds images and tables together
+INFO frame arrow expands all objects without modifying content
+INFO inline to cover preserves visible position relative to frame
+INFO frame picture drag commits without coordinate jump
+INFO frame image corner resizes inside content bounds
+INFO wrapped picture reserves checkbox gutter instead of covering task control
+INFO Shift Enter on trailing blank exits frame without removing its contents
+WARNING task box aligns to frame content edge, text follows with 4-unit gap
+WARNING task and surrounding prose share one continuous frame
+WARNING parent toolbar state survives task insertion
+WARNING visible nested checkbox is clickable
+WARNING Enter stays in task and preserves surrounding frame
+WARNING Shift Enter creates unchecked task in same frame
+WARNING image insertion keeps container and surrounding text
+WARNING table respects both frame insets
+WARNING editing table preserves frame
+WARNING table hit test uses the same inset as drawing
+WARNING click from table returns to trailing frame prose
+WARNING picture is contained by continuous background
+WARNING mixed container roundtrips stored document
+WARNING reader and editor use identical mixed-frame layout
+WARNING frame arrow folds images and tables together
+WARNING frame arrow expands all objects without modifying content
+WARNING inline to cover preserves visible position relative to frame
+WARNING frame picture drag commits without coordinate jump
+WARNING frame image corner resizes inside content bounds
+WARNING wrapped picture reserves checkbox gutter instead of covering task control
+WARNING Shift Enter on trailing blank exits frame without removing its contents
+NORMAL typed 1.  waits for space
+NORMAL typed 1.  keyboard space creates structural marker without literal prefix
+NORMAL typed 1.  retains parent container
+NORMAL typed 1.  undo restores literal prefix and space
+NORMAL typed 1.  undo places caret after literal prefix
+NORMAL typed 1.  Enter creates next item and Shift Enter stays within item
+NORMAL typed 1.  all new items retain list and frame
+NORMAL typed 1.  numbers advance automatically
+NORMAL typed 1.  middle insertion renumbers later items
+NORMAL typed 1.  deleting middle boundary renumbers later items
+NORMAL typed 1.  empty item exits list without removing parent frame
+NORMAL typed 1.  marker has clear gap before text
+NORMAL typed 1.  read and edit share identical text layout
+NORMAL typed -  waits for space
+NORMAL typed -  keyboard space creates structural marker without literal prefix
+NORMAL typed -  retains parent container
+NORMAL typed -  undo restores literal prefix and space
+NORMAL typed -  undo places caret after literal prefix
+NORMAL typed -  Enter creates next item and Shift Enter stays within item
+NORMAL typed -  all new items retain list and frame
+NORMAL typed -  empty item exits list without removing parent frame
+NORMAL typed -  marker has clear gap before text
+NORMAL typed -  read and edit share identical text layout
+NORMAL typed *  waits for space
+NORMAL typed *  keyboard space creates structural marker without literal prefix
+NORMAL typed *  retains parent container
+NORMAL typed *  undo restores literal prefix and space
+NORMAL typed *  undo places caret after literal prefix
+NORMAL typed *  Enter creates next item and Shift Enter stays within item
+NORMAL typed *  all new items retain list and frame
+NORMAL typed *  empty item exits list without removing parent frame
+NORMAL typed *  marker has clear gap before text
+NORMAL typed *  read and edit share identical text layout
+QUOTE typed 1.  waits for space
+QUOTE typed 1.  keyboard space creates structural marker without literal prefix
+QUOTE typed 1.  retains parent container
+QUOTE typed 1.  undo restores literal prefix and space
+QUOTE typed 1.  undo places caret after literal prefix
+QUOTE typed 1.  Enter creates next item and Shift Enter stays within item
+QUOTE typed 1.  all new items retain list and frame
+QUOTE typed 1.  numbers advance automatically
+QUOTE typed 1.  middle insertion renumbers later items
+QUOTE typed 1.  deleting middle boundary renumbers later items
+QUOTE typed 1.  empty item exits list without removing parent frame
+QUOTE typed 1.  marker has clear gap before text
+QUOTE typed 1.  read and edit share identical text layout
+QUOTE typed 1.  all items remain in one continuous frame
+QUOTE typed -  waits for space
+QUOTE typed -  keyboard space creates structural marker without literal prefix
+QUOTE typed -  retains parent container
+QUOTE typed -  undo restores literal prefix and space
+QUOTE typed -  undo places caret after literal prefix
+QUOTE typed -  Enter creates next item and Shift Enter stays within item
+QUOTE typed -  all new items retain list and frame
+QUOTE typed -  empty item exits list without removing parent frame
+QUOTE typed -  marker has clear gap before text
+QUOTE typed -  read and edit share identical text layout
+QUOTE typed -  all items remain in one continuous frame
+QUOTE typed *  waits for space
+QUOTE typed *  keyboard space creates structural marker without literal prefix
+QUOTE typed *  retains parent container
+QUOTE typed *  undo restores literal prefix and space
+QUOTE typed *  undo places caret after literal prefix
+QUOTE typed *  Enter creates next item and Shift Enter stays within item
+QUOTE typed *  all new items retain list and frame
+QUOTE typed *  empty item exits list without removing parent frame
+QUOTE typed *  marker has clear gap before text
+QUOTE typed *  read and edit share identical text layout
+QUOTE typed *  all items remain in one continuous frame
+INFO typed 1.  waits for space
+INFO typed 1.  keyboard space creates structural marker without literal prefix
+INFO typed 1.  retains parent container
+INFO typed 1.  undo restores literal prefix and space
+INFO typed 1.  undo places caret after literal prefix
+INFO typed 1.  Enter creates next item and Shift Enter stays within item
+INFO typed 1.  all new items retain list and frame
+INFO typed 1.  numbers advance automatically
+INFO typed 1.  middle insertion renumbers later items
+INFO typed 1.  deleting middle boundary renumbers later items
+INFO typed 1.  empty item exits list without removing parent frame
+INFO typed 1.  marker has clear gap before text
+INFO typed 1.  read and edit share identical text layout
+INFO typed 1.  all items remain in one continuous frame
+INFO typed -  waits for space
+INFO typed -  keyboard space creates structural marker without literal prefix
+INFO typed -  retains parent container
+INFO typed -  undo restores literal prefix and space
+INFO typed -  undo places caret after literal prefix
+INFO typed -  Enter creates next item and Shift Enter stays within item
+INFO typed -  all new items retain list and frame
+INFO typed -  empty item exits list without removing parent frame
+INFO typed -  marker has clear gap before text
+INFO typed -  read and edit share identical text layout
+INFO typed -  all items remain in one continuous frame
+INFO typed *  waits for space
+INFO typed *  keyboard space creates structural marker without literal prefix
+INFO typed *  retains parent container
+INFO typed *  undo restores literal prefix and space
+INFO typed *  undo places caret after literal prefix
+INFO typed *  Enter creates next item and Shift Enter stays within item
+INFO typed *  all new items retain list and frame
+INFO typed *  empty item exits list without removing parent frame
+INFO typed *  marker has clear gap before text
+INFO typed *  read and edit share identical text layout
+INFO typed *  all items remain in one continuous frame
+WARNING typed 1.  waits for space
+WARNING typed 1.  keyboard space creates structural marker without literal prefix
+WARNING typed 1.  retains parent container
+WARNING typed 1.  undo restores literal prefix and space
+WARNING typed 1.  undo places caret after literal prefix
+WARNING typed 1.  Enter creates next item and Shift Enter stays within item
+WARNING typed 1.  all new items retain list and frame
+WARNING typed 1.  numbers advance automatically
+WARNING typed 1.  middle insertion renumbers later items
+WARNING typed 1.  deleting middle boundary renumbers later items
+WARNING typed 1.  empty item exits list without removing parent frame
+WARNING typed 1.  marker has clear gap before text
+WARNING typed 1.  read and edit share identical text layout
+WARNING typed 1.  all items remain in one continuous frame
+WARNING typed -  waits for space
+WARNING typed -  keyboard space creates structural marker without literal prefix
+WARNING typed -  retains parent container
+WARNING typed -  undo restores literal prefix and space
+WARNING typed -  undo places caret after literal prefix
+WARNING typed -  Enter creates next item and Shift Enter stays within item
+WARNING typed -  all new items retain list and frame
+WARNING typed -  empty item exits list without removing parent frame
+WARNING typed -  marker has clear gap before text
+WARNING typed -  read and edit share identical text layout
+WARNING typed -  all items remain in one continuous frame
+WARNING typed *  waits for space
+WARNING typed *  keyboard space creates structural marker without literal prefix
+WARNING typed *  retains parent container
+WARNING typed *  undo restores literal prefix and space
+WARNING typed *  undo places caret after literal prefix
+WARNING typed *  Enter creates next item and Shift Enter stays within item
+WARNING typed *  all new items retain list and frame
+WARNING typed *  empty item exits list without removing parent frame
+WARNING typed *  marker has clear gap before text
+WARNING typed *  read and edit share identical text layout
+WARNING typed *  all items remain in one continuous frame
+QUOTE list toolbar formats current logical line and keeps surrounding prose 20
+QUOTE list toolbar formats current logical line and keeps surrounding prose 21
+INFO list toolbar formats current logical line and keeps surrounding prose 20
+INFO list toolbar formats current logical line and keeps surrounding prose 21
+WARNING list toolbar formats current logical line and keeps surrounding prose 20
+WARNING list toolbar formats current logical line and keeps surrounding prose 21
+typed prefix on middle soft line keeps intro and outro
+undo middle-line autoformat permits immediate literal typing at restored caret
+inline version number is not auto formatted
+space replacing selection does not trigger automatic list
+pasted literal list prefix is not converted by typing rule
+numbering restarts at independent frame, outside frame, and after ordinary prose
+typed list conversion preserves chosen typing style
+NUMBERED wrapped image avoids list marker as well as text
+BULLET wrapped image avoids list marker as well as text
+three digit list marker stays before aligned text and inside frame LEFT
+long list shares stable indentation and reaches 105 LEFT
+three digit list marker stays before aligned text and inside frame CENTER
+long list shares stable indentation and reaches 105 CENTER
+three digit list marker stays before aligned text and inside frame RIGHT
+long list shares stable indentation and reaches 105 RIGHT
